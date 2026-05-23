@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Local build output
+build/
+cmake-build-*/
+
+# Runtime saves and generated local output
+save.dat
+outputs/
+
+# Editor / temporary files
+*.tmp
+*.log
+.presentation_workspace_path
