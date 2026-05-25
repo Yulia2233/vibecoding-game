@@ -1,6 +1,7 @@
 #include "game.hpp"
 
 #include "game_content.hpp"
+#include "meta_content.hpp"
 #include "raymath.h"
 #include "rlgl.h"
 
@@ -9,9 +10,81 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
+
+namespace {
+
+const char* StageTypeName(StageType type) {
+    switch (type) {
+        case StageType::Normal: return u8"普通关";
+        case StageType::Elite: return u8"精英关";
+        case StageType::Boss: return u8"Boss关";
+    }
+    return u8"普通关";
+}
+
+int StarCap(int star) {
+    return std::max(1, std::min(5, star)) * 10;
+}
+
+int HeroUpgradeGoldCost(int level) {
+    return 22 + level * 12 + level * level / 3;
+}
+
+int HeroUpgradeExpCost(int level) {
+    return 16 + level * 9 + level * level / 4;
+}
+
+int HeroStarShardCost(int star) {
+    const int costs[] = {0, 20, 40, 80, 150};
+    if (star < 1 || star >= 5) return 0;
+    return costs[star];
+}
+
+int HeroStarGoldCost(int star) {
+    const int costs[] = {0, 160, 420, 980, 2200};
+    if (star < 1 || star >= 5) return 0;
+    return costs[star];
+}
+
+int EquipGoldCost(int level) {
+    return 55 + level * 36 + level * level * 5;
+}
+
+int EquipMatCost(int level) {
+    return 5 + level * 3 + level / 2;
+}
+
+int TalentGoldCost(int level) {
+    return 180 + level * 120;
+}
+
+int TalentPointCost(int level) {
+    return 1 + level / 2;
+}
+
+std::string ResourceText(const ResourceBundle& r) {
+    std::stringstream ss;
+    bool first = true;
+    auto add = [&](const char* name, int value) {
+        if (value <= 0) return;
+        if (!first) ss << "  ";
+        ss << name << "+" << value;
+        first = false;
+    };
+    add(u8"金币", r.gold);
+    add(u8"经验", r.heroExp);
+    add(u8"装备材料", r.gearMat);
+    add(u8"角色碎片", r.heroShard);
+    add(u8"天赋点", r.talentPoint);
+    add(u8"钻石", r.diamond);
+    return first ? u8"无" : ss.str();
+}
+
+} // namespace
 
 class Game::Impl {
 public:
@@ -20,6 +93,11 @@ public:
         levels = BuildLevels();
         heroesDef = BuildHeroes();
         supports = BuildSupports();
+        metaHeroes = BuildMetaHeroCatalog();
+        stages = BuildStageCatalog();
+        equipment = BuildEquipmentCatalog();
+        talents = BuildTalentCatalog();
+        selectedStage = 2;
         currentLevel = 2;
     }
 
@@ -29,6 +107,8 @@ public:
         SetWindowMinSize(kScreenW, kScreenH);
         SetTargetFPS(60);
         LoadSave();
+        selectedStage = std::max(0, std::min(save.selectedStage, save.unlockedStage - 1));
+        currentLevel = BattleLevelIndexForStage(selectedStage);
         LoadUIFont();
         LoadAssets();
     }
@@ -57,7 +137,19 @@ public:
     }
 
     bool SaveScreenshot(const std::string& mode, const std::string& path) {
+        SaveData originalSave = save;
+        GameState originalState = state;
+        int originalCurrentLevel = currentLevel;
+        int originalSelectedStage = selectedStage;
+        int originalSelectedHero = selectedHero;
+        int originalSelectedEquip = selectedEquip;
+        int originalSelectedTalent = selectedTalent;
+        int originalSelectedLineupSlot = selectedLineupSlot;
+        StageRunResult originalRunResult = currentRunResult;
+        std::string originalResultLoot = resultLoot;
+        bool originalResultHandled = resultHandled;
         if (mode == "battle") {
+            selectedStage = std::max(0, std::min(save.selectedStage, save.unlockedStage - 1));
             ResetStage();
             for (int i = 0; i < 300; ++i) {
                 UpdateGame(1.0f / 45.0f);
@@ -68,12 +160,31 @@ public:
         } else if (mode == "draft") {
             ResetStage();
             OpenDraft();
-        } else if (mode == "stage") {
+        } else if (mode == "stage" || mode == "map") {
             state = GameState::StageSelect;
-        } else if (mode == "meta") {
-            state = GameState::Meta;
-        } else if (mode == "start") {
+        } else if (mode == "meta" || mode == "equipment") {
+            state = GameState::Equipment;
+        } else if (mode == "heroes") {
+            state = GameState::Heroes;
+        } else if (mode == "talents") {
+            state = GameState::Talents;
+        } else if (mode == "lineup") {
+            state = GameState::Lineup;
+        } else if (mode == "chests") {
+            state = GameState::Chests;
+        } else if (mode == "start" || mode == "city" || mode == "lobby") {
             state = GameState::Lobby;
+        } else if (mode == "result") {
+            ResetStage();
+            for (int i = 0; i < 2400 && state == GameState::Playing; ++i) {
+                UpdateGame(1.0f / 30.0f);
+                UpdateParticles(1.0f / 30.0f);
+            }
+            if (state == GameState::Playing) {
+                state = GameState::Defeat;
+                wallHp = 0;
+                HandleBattleEnd(false);
+            }
         } else {
             return false;
         }
@@ -90,6 +201,18 @@ public:
         bool ok = ExportImage(image, path.c_str());
         UnloadImage(image);
         UnloadRenderTexture(target);
+        save = originalSave;
+        state = originalState;
+        currentLevel = originalCurrentLevel;
+        selectedStage = originalSelectedStage;
+        selectedHero = originalSelectedHero;
+        selectedEquip = originalSelectedEquip;
+        selectedTalent = originalSelectedTalent;
+        selectedLineupSlot = originalSelectedLineupSlot;
+        currentRunResult = originalRunResult;
+        resultLoot = originalResultLoot;
+        resultHandled = originalResultHandled;
+        SaveProgress();
         return ok;
     }
 
@@ -104,19 +227,21 @@ public:
 
         check(levels.size() == 30, "30 levels are defined");
         check(heroesDef.size() == kHeroCount, "30 hero archetypes are defined");
+        check(metaHeroes.size() == kMetaHeroCount, "6 out-of-run heroes are defined");
+        check(stages.size() == kLevelCount, "5 chapters and 50 stages are defined");
+        check(equipment.size() == kEquipmentSlotCount, "4 equipment slots are defined");
+        check(talents.size() == kTalentCount, "4 talent branches with 5 nodes each are defined");
         bool heroDataOk = true;
         for (const auto& hero : heroesDef) {
             heroDataOk = heroDataOk && !hero.name.empty() && !hero.job.empty() && !hero.spriteKey.empty() &&
                          hero.baseDamage > 0.0f && hero.cooldown > 0.0f && hero.range > 0.0f;
         }
         check(heroDataOk, "every hero has complete numeric and resource metadata");
-        check(supports.size() == kSupportCount, "5 out-of-run support heroes are defined");
         check(assets.spritesLoaded, "PNG sprite assets are loaded");
         check(assets.heroes.size() == heroesDef.size(), "hero sprite slots match hero catalog and allow future replacement");
         check(assets.audioLoaded, "WAV sound effects are loaded");
-        check(save.unlockedLevel >= 1 && save.unlockedLevel <= 30, "save data stores unlocked progress");
-        check(save.starDust >= 0, "save data stores out-of-run currency");
-        check(save.supportCopies[save.activeSupport] > 0, "save data stores owned active support hero");
+        check(save.unlockedStage >= 1 && save.unlockedStage <= kLevelCount, "save data stores 50-stage unlock progress");
+        check(save.resources.gold >= 0 && save.resources.heroExp >= 0 && save.resources.gearMat >= 0, "save data stores new out-of-run resources");
         state = GameState::Lobby;
         check(state == GameState::Lobby, "game boots into out-of-run lobby");
 
@@ -193,27 +318,43 @@ public:
         save.supportCopies[0] = std::max(1, save.supportCopies[0]);
         ResetStage();
         int damageBeforeMeta = static_cast<int>(globalDamage * 1000.0f);
-        save.equipmentLevel += 1;
+        save.equipLevel[0] += 2;
         ResetStage();
-        check(static_cast<int>(globalDamage * 1000.0f) > damageBeforeMeta, "equipment cultivation affects battle damage");
-        save.equipmentLevel -= 1;
+        check(static_cast<int>(globalDamage * 1000.0f) > damageBeforeMeta, "new weapon equipment affects old in-run damage");
+        save.equipLevel[0] -= 2;
         ResetStage();
-        float supportDamage = globalDamage;
-        save.activeSupport = 1;
-        save.supportCopies[1] = std::max(1, save.supportCopies[1]);
+        int powerBefore = LineupPower();
+        save.resources.gold += 9999;
+        save.resources.heroExp += 9999;
+        int heroLevelBefore = save.heroLevel[0];
+        bool upgradedHero = TryUpgradeHero(0, false);
+        check(upgradedHero && save.heroLevel[0] == heroLevelBefore + 1 && LineupPower() > powerBefore, "hero upgrade increases saved lineup power");
+        save.resources.heroShard += 9999;
+        save.resources.gold += 9999;
+        int heroStarBefore = save.heroStar[0];
+        bool starredHero = TryStarHero(0, false);
+        check(starredHero && save.heroStar[0] == heroStarBefore + 1, "hero star-up spends shards and saves");
+        save.resources.gearMat += 9999;
+        save.resources.gold += 9999;
+        int equipBefore = save.equipLevel[0];
+        bool upgradedEquip = TryUpgradeEquip(0, false);
+        check(upgradedEquip && save.equipLevel[0] == equipBefore + 1, "equipment upgrade consumes materials");
+        save.resources.talentPoint += 20;
+        save.resources.gold += 9999;
+        bool upgradedTalent = TryUpgradeTalent(0, false);
+        check(upgradedTalent && save.talentLevel[0] > 0, "talent upgrade consumes talent points");
         ResetStage();
-        check(globalAttackSpeed > 1.0f && globalDamage <= supportDamage + 0.25f, "selected support hero changes in-run buff");
-        int ticketsBefore = save.gachaTickets;
-        save.gachaTickets = std::max(1, save.gachaTickets);
-        int ownedBefore = TotalSupportCopies();
-        bool drewSupport = TrySupportGacha(false);
-        check(drewSupport && TotalSupportCopies() == ownedBefore + 1, "out-of-run support gacha grants a support copy");
-        save.gachaTickets = ticketsBefore;
-        int materialsBefore = save.equipmentParts + save.totemRunes + save.cloakSilk + save.rareGear + save.epicGear + save.mythicGear;
-        currentLevel = 4;
+        int goldBeforeWin = save.resources.gold;
+        int starsBefore = save.stageStars[selectedStage];
+        resultHandled = false;
+        wallHp = wallMaxHp;
         HandleBattleEnd(true);
-        int materialsAfter = save.equipmentParts + save.totemRunes + save.cloakSilk + save.rareGear + save.epicGear + save.mythicGear;
-        check(materialsAfter > materialsBefore, "victory settlement grants cultivation materials and gear drops");
+        check(save.resources.gold > goldBeforeWin && save.stageStars[selectedStage] >= std::max(1, starsBefore), "victory settlement grants new resources and stars");
+        int goldBeforeFail = save.resources.gold;
+        resultHandled = false;
+        wallHp = 0;
+        HandleBattleEnd(false);
+        check(save.resources.gold > goldBeforeFail && currentRunResult.failure != FailureReason::None, "failure settlement grants comfort rewards and a clear reason");
         ResetStage();
 
         for (int i = 0; i < 240; ++i) {
@@ -239,6 +380,10 @@ private:
     std::vector<LevelInfo> levels;
     std::vector<HeroDef> heroesDef;
     std::vector<SupportDef> supports;
+    std::vector<HeroMetaDef> metaHeroes;
+    std::vector<StageInfo> stages;
+    std::vector<EquipmentDef> equipment;
+    std::vector<TalentDef> talents;
     std::array<Hero, kMaxSlots> slots{};
     std::vector<Enemy> enemies;
     std::vector<Projectile> projectiles;
@@ -247,6 +392,11 @@ private:
     std::vector<DraftChoice> draftChoices;
 
     int currentLevel = 0;
+    int selectedStage = 0;
+    int selectedHero = 0;
+    int selectedEquip = 0;
+    int selectedTalent = 0;
+    int selectedLineupSlot = 0;
     int wave = 0;
     int totalWaves = 10;
     int nextEnemyId = 1;
@@ -262,6 +412,7 @@ private:
     float toastTimer = 0.0f;
     std::string toast = "";
     std::string resultLoot = "";
+    StageRunResult currentRunResult;
 
     int selectedSlot = -1;
     int dragSlot = -1;
@@ -294,9 +445,19 @@ private:
     float rewardBonus = 1.0f;
 
     Rectangle startButton{176, 812, 220, 54};
-    Rectangle adventureButton{46, 642, 338, 66};
+    Rectangle adventureButton{34, 606, 362, 58};
     Rectangle metaMenuButton{46, 724, 338, 58};
     Rectangle backButton{30, 812, 118, 54};
+    Rectangle cityRecommendButton{34, 550, 362, 42};
+    Rectangle cityHeroesButton{34, 684, 172, 52};
+    Rectangle cityEquipmentButton{224, 684, 172, 52};
+    Rectangle cityTalentsButton{34, 748, 172, 52};
+    Rectangle cityLineupButton{224, 748, 172, 52};
+    Rectangle navBack{28, 816, 112, 46};
+    Rectangle navMain{156, 820, 246, 46};
+    Rectangle mapPrev{34, 694, 72, 44};
+    Rectangle mapNext{324, 694, 72, 44};
+    Rectangle mapChallenge{82, 756, 266, 52};
     Rectangle prevStageButton{54, 596, 64, 48};
     Rectangle nextStageButton{312, 596, 64, 48};
     Rectangle summonButton{322, 805, 86, 72};
@@ -375,6 +536,29 @@ private:
     }
 
     void NormalizeSave() {
+        save.unlockedStage = std::max(1, std::min(kLevelCount, save.unlockedStage));
+        save.highestCleared = std::max(0, std::min(kLevelCount, save.highestCleared));
+        save.selectedStage = std::max(0, std::min(kLevelCount - 1, save.selectedStage));
+        save.resources.gold = std::max(0, save.resources.gold);
+        save.resources.heroExp = std::max(0, save.resources.heroExp);
+        save.resources.gearMat = std::max(0, save.resources.gearMat);
+        save.resources.heroShard = std::max(0, save.resources.heroShard);
+        save.resources.talentPoint = std::max(0, save.resources.talentPoint);
+        save.resources.diamond = std::max(0, save.resources.diamond);
+        for (int i = 0; i < kMetaHeroCount; ++i) {
+            save.heroStar[i] = std::max(1, std::min(5, save.heroStar[i]));
+            save.heroLevel[i] = std::max(1, std::min(StarCap(save.heroStar[i]), save.heroLevel[i]));
+        }
+        for (int& id : save.lineup) id = std::max(0, std::min(kMetaHeroCount - 1, id));
+        if (save.lineup[1] == save.lineup[0]) save.lineup[1] = 1;
+        if (save.lineup[2] == save.lineup[0] || save.lineup[2] == save.lineup[1]) save.lineup[2] = 2;
+        for (int& level : save.equipLevel) level = std::max(0, std::min(20, level));
+        for (int i = 0; i < kTalentCount; ++i) save.talentLevel[i] = std::max(0, std::min(talents[i].maxLevel, save.talentLevel[i]));
+        for (int& stars : save.stageStars) stars = std::max(0, std::min(3, stars));
+        for (int& chest : save.chestClaimed) chest = chest ? 1 : 0;
+        selectedStage = std::max(0, std::min(save.selectedStage, save.unlockedStage - 1));
+        selectedHero = std::max(0, std::min(kMetaHeroCount - 1, selectedHero));
+
         save.unlockedLevel = std::max(1, std::min(30, save.unlockedLevel));
         save.starDust = std::max(0, save.starDust);
         save.equipmentParts = std::max(0, save.equipmentParts);
@@ -405,7 +589,214 @@ private:
                 }
             }
         }
-        currentLevel = std::min(currentLevel, save.unlockedLevel - 1);
+        save.unlockedLevel = std::max(save.unlockedLevel, std::min(30, save.unlockedStage));
+        save.bestLevel = std::max(save.bestLevel, save.highestCleared);
+        currentLevel = BattleLevelIndexForStage(selectedStage);
+    }
+
+    int HeroAttack(int id) const {
+        const auto& h = metaHeroes[id];
+        int level = save.heroLevel[id];
+        int star = save.heroStar[id];
+        return static_cast<int>((h.baseAttack + (level - 1) * h.attackGrowth) * (1.0f + (star - 1) * 0.18f));
+    }
+
+    int HeroLife(int id) const {
+        const auto& h = metaHeroes[id];
+        int level = save.heroLevel[id];
+        int star = save.heroStar[id];
+        return static_cast<int>((h.baseLife + (level - 1) * h.lifeGrowth) * (1.0f + (star - 1) * 0.22f));
+    }
+
+    int HeroPower(int id) const {
+        return HeroAttack(id) * 4 + HeroLife(id) / 4 + save.heroStar[id] * 85;
+    }
+
+    bool InLineup(int hero) const {
+        for (int id : save.lineup) if (id == hero) return true;
+        return false;
+    }
+
+    int LineupPower() const {
+        int power = 0;
+        for (int id : save.lineup) power += HeroPower(id);
+        for (int i = 0; i < kEquipmentSlotCount; ++i) power += save.equipLevel[i] * (55 + i * 12);
+        for (int level : save.talentLevel) power += level * 70;
+        return power;
+    }
+
+    float TalentLevel(int branch, int node) const {
+        return static_cast<float>(save.talentLevel[branch * kTalentNodesPerBranch + node]);
+    }
+
+    bool HasRole(RoleKind kind) const {
+        for (int id : save.lineup) if (metaHeroes[id].kind == kind) return true;
+        return false;
+    }
+
+    int CountDifferentJobs() const {
+        std::set<std::string> jobs;
+        for (int id : save.lineup) jobs.insert(metaHeroes[id].job);
+        return static_cast<int>(jobs.size());
+    }
+
+    int ChapterStars(int chapterZero) const {
+        int total = 0;
+        int start = chapterZero * kStagesPerChapter;
+        for (int i = 0; i < kStagesPerChapter; ++i) total += save.stageStars[start + i];
+        return total;
+    }
+
+    bool ChestClaimed(int chapterZero, int chestIdx) const {
+        int idx = chapterZero * kChestCountPerChapter + chestIdx;
+        return idx >= 0 && idx < static_cast<int>(save.chestClaimed.size()) && save.chestClaimed[idx] != 0;
+    }
+
+    ResourceBundle ChestReward(int chapterZero, int chestIdx) const {
+        int chapter = chapterZero + 1;
+        if (chestIdx == 0) return {320 * chapter, 220 * chapter, 18 * chapter, 0, 0, 0};
+        if (chestIdx == 1) return {560 * chapter, 260 * chapter, 26 * chapter, 24 + chapter * 8, 1, 0};
+        return {900 * chapter, 420 * chapter, 40 * chapter, 48 + chapter * 12, 2, 8 + chapter * 2};
+    }
+
+    bool SystemUnlocked(GameState target) const {
+        if (target == GameState::Lineup) return save.highestCleared >= 3;
+        if (target == GameState::Equipment) return save.highestCleared >= 8;
+        if (target == GameState::Talents) return save.highestCleared >= 10;
+        if (target == GameState::Chests) return save.highestCleared >= 15;
+        return true;
+    }
+
+    std::string UnlockText(GameState target) const {
+        if (target == GameState::Lineup) return u8"通关 1-3 解锁阵容编辑";
+        if (target == GameState::Equipment) return u8"通关 1-8 解锁装备强化";
+        if (target == GameState::Talents) return u8"通关 2-1 解锁天赋树";
+        if (target == GameState::Chests) return u8"通关 2-5 解锁章节宝箱";
+        return "";
+    }
+
+    bool HasChestReady() const {
+        const int needs[] = {10, 20, 30};
+        for (int c = 0; c < kChapterCount; ++c) {
+            int stars = ChapterStars(c);
+            for (int i = 0; i < 3; ++i) {
+                if (stars >= needs[i] && !ChestClaimed(c, i)) return true;
+            }
+        }
+        return false;
+    }
+
+    bool TalentPrereqMet(int idx) const {
+        const TalentDef& t = talents[idx];
+        if (t.prerequisite < 0) return true;
+        int base = static_cast<int>(t.branch) * kTalentNodesPerBranch;
+        int prereqIdx = base + t.prerequisite;
+        return save.talentLevel[prereqIdx] >= t.prerequisiteLevel;
+    }
+
+    bool CanUpgradeTalent(int idx) const {
+        const TalentDef& t = talents[idx];
+        int level = save.talentLevel[idx];
+        return level < t.maxLevel && TalentPrereqMet(idx) &&
+               save.resources.gold >= TalentGoldCost(level) &&
+               save.resources.talentPoint >= TalentPointCost(level);
+    }
+
+    bool AnyHeroCanUpgrade() const {
+        for (int i = 0; i < kMetaHeroCount; ++i) {
+            if (save.heroLevel[i] < StarCap(save.heroStar[i]) &&
+                save.resources.gold >= HeroUpgradeGoldCost(save.heroLevel[i]) &&
+                save.resources.heroExp >= HeroUpgradeExpCost(save.heroLevel[i])) return true;
+        }
+        return false;
+    }
+
+    bool AnyHeroCanStar() const {
+        for (int i = 0; i < kMetaHeroCount; ++i) {
+            int star = save.heroStar[i];
+            if (star < 5 && save.resources.heroShard >= HeroStarShardCost(star) &&
+                save.resources.gold >= HeroStarGoldCost(star)) return true;
+        }
+        return false;
+    }
+
+    bool AnyEquipCanUpgrade() const {
+        for (int i = 0; i < kEquipmentSlotCount; ++i) {
+            int level = save.equipLevel[i];
+            if (level < 20 && save.resources.gold >= EquipGoldCost(level) &&
+                save.resources.gearMat >= EquipMatCost(level)) return true;
+        }
+        return false;
+    }
+
+    bool AnyTalentCanUpgrade() const {
+        for (int i = 0; i < kTalentCount; ++i) if (CanUpgradeTalent(i)) return true;
+        return false;
+    }
+
+    std::string NextRecommendation() const {
+        if (HasChestReady() && SystemUnlocked(GameState::Chests)) return u8"领取章节星级宝箱";
+        int next = std::min(save.unlockedStage - 1, kLevelCount - 1);
+        int power = LineupPower();
+        if (power < stages[next].recommendedPower * 0.85f) {
+            EnemyType enemy = stages[next].enemy;
+            if (enemy == EnemyType::Swarm) return u8"培养火焰法师或雷电术士提升清怪";
+            if (enemy == EnemyType::Armored || stages[next].type == StageType::Boss) return u8"培养狂战士并强化武器";
+            if (enemy == EnemyType::Swift) return u8"培养冰霜弓手、圣盾守卫或强化护甲";
+            return u8"升级主力角色后再挑战";
+        }
+        if (AnyHeroCanStar()) return u8"有角色可升星，升星会解锁机制";
+        if (AnyEquipCanUpgrade() && SystemUnlocked(GameState::Equipment)) return u8"强化装备，冲阶段奖励";
+        if (AnyTalentCanUpgrade() && SystemUnlocked(GameState::Talents)) return u8"点亮可升级天赋";
+        std::stringstream ss;
+        ss << u8"挑战 " << stages[next].chapter << "-" << stages[next].local;
+        return ss.str();
+    }
+
+    std::string PowerHint(int power, int recommended) const {
+        float ratio = recommended > 0 ? static_cast<float>(power) / recommended : 1.0f;
+        if (ratio >= 1.2f) return u8"预计轻松通关，可尝试冲击三星。";
+        if (ratio >= 1.0f) return u8"预计可以挑战。";
+        if (ratio >= 0.85f) return u8"有一定风险，建议优化阵容或养成。";
+        return u8"挑战困难，建议先提升角色、装备或天赋。";
+    }
+
+    std::string RecommendedLineup(EnemyType enemy) const {
+        if (enemy == EnemyType::Swarm) return u8"火焰法师 / 雷电术士 / 自然祭司";
+        if (enemy == EnemyType::Armored || enemy == EnemyType::Boss) return u8"狂战士 / 雷电术士 / 自然祭司";
+        if (enemy == EnemyType::Swift) return u8"冰霜弓手 / 圣盾守卫 / 自然祭司";
+        return u8"均衡阵容";
+    }
+
+    const char* FailureName(FailureReason reason) const {
+        switch (reason) {
+            case FailureReason::Output: return u8"输出不足";
+            case FailureReason::Defense: return u8"防御不足";
+            case FailureReason::Clear: return u8"清怪不足";
+            case FailureReason::Boss: return u8"Boss爆发不足";
+            case FailureReason::Control: return u8"控制不足";
+            case FailureReason::None: return u8"无";
+        }
+        return u8"无";
+    }
+
+    std::string AdviceFor(FailureReason reason) const {
+        switch (reason) {
+            case FailureReason::Output: return u8"建议升级输出角色、强化武器，或点攻击天赋。";
+            case FailureReason::Defense: return u8"建议强化护甲、培养圣盾守卫，或点防御天赋。";
+            case FailureReason::Clear: return u8"敌人数量较多，建议培养火焰法师或雷电术士。";
+            case FailureReason::Boss: return u8"Boss 剩余生命较高，建议培养狂战士并强化武器。";
+            case FailureReason::Control: return u8"疾行怪冲击太强，建议上阵冰霜弓手和自然祭司。";
+            case FailureReason::None: return u8"继续推进下一关。";
+        }
+        return u8"继续推进下一关。";
+    }
+
+    std::string StarCountText(int n) const {
+        if (n <= 0) return u8"☆☆☆";
+        if (n == 1) return u8"★☆☆";
+        if (n == 2) return u8"★★☆";
+        return u8"★★★";
     }
 
     Texture2D LoadChromaTexture(const std::string& path) {
@@ -448,13 +839,53 @@ private:
         return "save.dat";
     }
 
+    int BattleLevelIndexForStage(int stageIndex) const {
+        return std::max(0, std::min(29, stageIndex));
+    }
+
+    const StageInfo& StageAt(int stageIndex) const {
+        int idx = std::max(0, std::min(kLevelCount - 1, stageIndex));
+        return stages[idx];
+    }
+
     void LoadSave() {
         std::ifstream in(SavePath());
         if (!in) return;
         std::string key;
         int value = 0;
         while (in >> key >> value) {
-            if (key == "unlockedLevel") save.unlockedLevel = value;
+            if (key == "gold") save.resources.gold = value;
+            else if (key == "heroExp") save.resources.heroExp = value;
+            else if (key == "gearMat") save.resources.gearMat = value;
+            else if (key == "heroShard") save.resources.heroShard = value;
+            else if (key == "talentPoint") save.resources.talentPoint = value;
+            else if (key == "diamond") save.resources.diamond = value;
+            else if (key == "unlockedStage") save.unlockedStage = value;
+            else if (key == "highestCleared") save.highestCleared = value;
+            else if (key == "selectedStage") save.selectedStage = value;
+            else if (key.rfind("stageStars", 0) == 0) {
+                int i = ParseIndex(key, 10);
+                if (i >= 0 && i < kLevelCount) save.stageStars[i] = value;
+            } else if (key.rfind("chest", 0) == 0) {
+                int i = ParseIndex(key, 5);
+                if (i >= 0 && i < static_cast<int>(save.chestClaimed.size())) save.chestClaimed[i] = value;
+            } else if (key.rfind("heroLevel", 0) == 0) {
+                int i = ParseIndex(key, 9);
+                if (i >= 0 && i < kMetaHeroCount) save.heroLevel[i] = value;
+            } else if (key.rfind("heroStar", 0) == 0) {
+                int i = ParseIndex(key, 8);
+                if (i >= 0 && i < kMetaHeroCount) save.heroStar[i] = value;
+            } else if (key.rfind("lineup", 0) == 0) {
+                int i = ParseIndex(key, 6);
+                if (i >= 0 && i < kLineupSlots) save.lineup[i] = value;
+            } else if (key.rfind("equip", 0) == 0) {
+                int i = ParseIndex(key, 5);
+                if (i >= 0 && i < kEquipmentSlotCount) save.equipLevel[i] = value;
+            } else if (key.rfind("talent", 0) == 0) {
+                int i = ParseIndex(key, 6);
+                if (i >= 0 && i < kTalentCount) save.talentLevel[i] = value;
+            }
+            else if (key == "unlockedLevel") save.unlockedLevel = value;
             else if (key == "starDust") save.starDust = value;
             else if (key == "equipmentParts") save.equipmentParts = value;
             else if (key == "totemRunes") save.totemRunes = value;
@@ -484,9 +915,33 @@ private:
         NormalizeSave();
     }
 
+    int ParseIndex(const std::string& key, size_t offset) const {
+        try {
+            return std::stoi(key.substr(offset));
+        } catch (...) {
+            return -1;
+        }
+    }
+
     void SaveProgress() {
         std::ofstream out(SavePath(), std::ios::trunc);
         if (!out) return;
+        out << "gold " << save.resources.gold << "\n";
+        out << "heroExp " << save.resources.heroExp << "\n";
+        out << "gearMat " << save.resources.gearMat << "\n";
+        out << "heroShard " << save.resources.heroShard << "\n";
+        out << "talentPoint " << save.resources.talentPoint << "\n";
+        out << "diamond " << save.resources.diamond << "\n";
+        out << "unlockedStage " << save.unlockedStage << "\n";
+        out << "highestCleared " << save.highestCleared << "\n";
+        out << "selectedStage " << save.selectedStage << "\n";
+        for (int i = 0; i < kLevelCount; ++i) out << "stageStars" << i << " " << save.stageStars[i] << "\n";
+        for (int i = 0; i < static_cast<int>(save.chestClaimed.size()); ++i) out << "chest" << i << " " << save.chestClaimed[i] << "\n";
+        for (int i = 0; i < kMetaHeroCount; ++i) out << "heroLevel" << i << " " << save.heroLevel[i] << "\n";
+        for (int i = 0; i < kMetaHeroCount; ++i) out << "heroStar" << i << " " << save.heroStar[i] << "\n";
+        for (int i = 0; i < kLineupSlots; ++i) out << "lineup" << i << " " << save.lineup[i] << "\n";
+        for (int i = 0; i < kEquipmentSlotCount; ++i) out << "equip" << i << " " << save.equipLevel[i] << "\n";
+        for (int i = 0; i < kTalentCount; ++i) out << "talent" << i << " " << save.talentLevel[i] << "\n";
         out << "unlockedLevel " << save.unlockedLevel << "\n";
         out << "starDust " << save.starDust << "\n";
         out << "equipmentParts " << save.equipmentParts << "\n";
@@ -591,9 +1046,190 @@ private:
         return true;
     }
 
+    bool TryUpgradeHero(int id, bool feedback = true) {
+        int level = save.heroLevel[id];
+        int star = save.heroStar[id];
+        if (level >= StarCap(star)) {
+            if (feedback) ShowToast(u8"已达等级上限，请先升星");
+            return false;
+        }
+        int gold = HeroUpgradeGoldCost(level);
+        int exp = HeroUpgradeExpCost(level);
+        if (save.resources.gold < gold || save.resources.heroExp < exp) {
+            if (feedback) ShowToast(u8"金币或角色经验不足，可挑战普通关获得");
+            return false;
+        }
+        save.resources.gold -= gold;
+        save.resources.heroExp -= exp;
+        save.heroLevel[id]++;
+        SaveProgress();
+        if (feedback) {
+            PlaySfx(assets.draft);
+            ShowToast(u8"角色升级，战力提升");
+        }
+        return true;
+    }
+
+    bool TryStarHero(int id, bool feedback = true) {
+        int star = save.heroStar[id];
+        if (star >= 5) {
+            if (feedback) ShowToast(u8"角色已满星");
+            return false;
+        }
+        int shards = HeroStarShardCost(star);
+        int gold = HeroStarGoldCost(star);
+        if (save.resources.heroShard < shards || save.resources.gold < gold) {
+            if (feedback) ShowToast(u8"角色碎片或金币不足，可挑战精英关获得");
+            return false;
+        }
+        save.resources.heroShard -= shards;
+        save.resources.gold -= gold;
+        save.heroStar[id]++;
+        SaveProgress();
+        if (feedback) {
+            PlaySfx(assets.merge);
+            ShowToast(save.heroStar[id] == 3 ? metaHeroes[id].star3Desc : u8"角色升星成功");
+        }
+        return true;
+    }
+
+    bool TryUpgradeEquip(int slot, bool feedback = true) {
+        int level = save.equipLevel[slot];
+        if (level >= 20) {
+            if (feedback) ShowToast(u8"装备已满级");
+            return false;
+        }
+        int gold = EquipGoldCost(level);
+        int mat = EquipMatCost(level);
+        if (save.resources.gold < gold || save.resources.gearMat < mat) {
+            if (feedback) ShowToast(u8"金币或装备材料不足，推荐挑战精英关或 Boss 关");
+            return false;
+        }
+        save.resources.gold -= gold;
+        save.resources.gearMat -= mat;
+        save.equipLevel[slot]++;
+        SaveProgress();
+        if (feedback) {
+            PlaySfx(assets.draft);
+            if (save.equipLevel[slot] % 5 == 0) ShowToast(equipment[slot].milestones[save.equipLevel[slot] / 5 - 1]);
+            else ShowToast(u8"装备强化成功");
+        }
+        return true;
+    }
+
+    bool TryUpgradeTalent(int idx, bool feedback = true) {
+        const TalentDef& t = talents[idx];
+        int level = save.talentLevel[idx];
+        if (level >= t.maxLevel) {
+            if (feedback) ShowToast(u8"天赋已满级");
+            return false;
+        }
+        if (!TalentPrereqMet(idx)) {
+            if (feedback) ShowToast(u8"前置天赋不足");
+            return false;
+        }
+        int gold = TalentGoldCost(level);
+        int points = TalentPointCost(level);
+        if (save.resources.gold < gold || save.resources.talentPoint < points) {
+            if (feedback) ShowToast(u8"金币或天赋点不足，可通关 Boss 或领宝箱");
+            return false;
+        }
+        save.resources.gold -= gold;
+        save.resources.talentPoint -= points;
+        save.talentLevel[idx]++;
+        SaveProgress();
+        if (feedback) {
+            PlaySfx(assets.draft);
+            ShowToast(t.keyNode ? u8"关键天赋已点亮" : u8"天赋升级成功");
+        }
+        return true;
+    }
+
+    void TryClaimChest(int chapter, int chestIdx) {
+        const int needs[] = {10, 20, 30};
+        int idx = chapter * kChestCountPerChapter + chestIdx;
+        if (idx < 0 || idx >= static_cast<int>(save.chestClaimed.size())) return;
+        if (save.chestClaimed[idx]) {
+            ShowToast(u8"宝箱已领取");
+            return;
+        }
+        if (ChapterStars(chapter) < needs[chestIdx]) {
+            ShowToast(u8"章节星数不足");
+            return;
+        }
+        ResourceBundle reward = ChestReward(chapter, chestIdx);
+        save.resources += reward;
+        save.chestClaimed[idx] = 1;
+        SaveProgress();
+        PlaySfx(assets.merge);
+        ShowToast(u8"领取宝箱：" + ResourceText(reward));
+    }
+
+    void TrySetLineup(int hero) {
+        if (InLineup(hero)) {
+            ShowToast(u8"该角色已上阵");
+            return;
+        }
+        save.lineup[selectedLineupSlot] = hero;
+        SaveProgress();
+        ShowToast(u8"阵容已保存");
+    }
+
+    void GoSystem(GameState target) {
+        if (!SystemUnlocked(target)) {
+            ShowToast(UnlockText(target));
+            return;
+        }
+        state = target;
+    }
+
+    void FollowRecommendation() {
+        if (HasChestReady() && SystemUnlocked(GameState::Chests)) {
+            state = GameState::Chests;
+            return;
+        }
+        if (AnyHeroCanStar() || AnyHeroCanUpgrade()) {
+            state = GameState::Heroes;
+            return;
+        }
+        if (AnyEquipCanUpgrade() && SystemUnlocked(GameState::Equipment)) {
+            state = GameState::Equipment;
+            return;
+        }
+        if (AnyTalentCanUpgrade() && SystemUnlocked(GameState::Talents)) {
+            state = GameState::Talents;
+            return;
+        }
+        state = GameState::StageSelect;
+    }
+
+    GameState SuggestedGrowthScreen(FailureReason reason) const {
+        if (reason == FailureReason::Defense || reason == FailureReason::Control) {
+            return SystemUnlocked(GameState::Equipment) ? GameState::Equipment : GameState::Heroes;
+        }
+        if (reason == FailureReason::Boss || reason == FailureReason::Output || reason == FailureReason::Clear) return GameState::Heroes;
+        return GameState::Heroes;
+    }
+
+    Rectangle StageNodeRect(int localZero) const {
+        int col = localZero % 5;
+        int row = localZero / 5;
+        return {39.0f + col * 72.0f, 246.0f + row * 92.0f, 54.0f, 54.0f};
+    }
+
+    Rectangle TalentNodeRect(int idx) const {
+        int branch = idx / kTalentNodesPerBranch;
+        int node = idx % kTalentNodesPerBranch;
+        return {34.0f + node * 74.0f, 166.0f + branch * 112.0f, 56.0f, 56.0f};
+    }
+
     void LoadUIFont() {
         std::string glyphs = u8"永远的蔚蓝星球随机合成塔防开始防守选择关卡上一关下一关"
                              u8"0123456789/.:：+-<>x×★·%，% Boss Lv"
+                             u8"主城首页闯关地图角色养成装备强化天赋树阵容编辑章节星级宝箱"
+                             u8"金币经验材料碎片天赋点钻石当前进度最高通关主阵容战力推荐行动执行"
+                             u8"普通关精英关疾行怪重甲怪群体小怪混合敌群预计轻松可以挑战风险困难"
+                             u8"升级升星强化选中装备关键节点锁定已上阵点击替换宝箱可领取还差星"
                              u8"第关异变山谷波次统计暂停继续胜利失败重试进入下一关"
                              u8"银币召唤强化霜冻炮击号令城墙生命剩余怪物击杀最高星级次数合成"
                              u8"随机强化选择一项成长点击或拖拽相同英雄进行二合一满槽位相同英雄可合成"
@@ -621,6 +1257,17 @@ private:
             glyphs += support.job;
             glyphs += support.desc;
         }
+        for (const auto& h : metaHeroes) {
+            glyphs += h.name + h.role + h.job + h.skillName + h.skillDesc + h.star3Desc + h.star5Desc + h.recommendation;
+        }
+        for (const auto& s : stages) {
+            glyphs += s.chapterName + s.name + s.enemyName + s.tip;
+        }
+        for (const auto& e : equipment) {
+            glyphs += e.name + e.desc;
+            for (const auto& milestone : e.milestones) glyphs += milestone;
+        }
+        for (const auto& t : talents) glyphs += t.name + t.desc;
         int codepointCount = 0;
         int* codepoints = LoadCodepoints(glyphs.c_str(), &codepointCount);
         const char* candidates[] = {
@@ -668,6 +1315,8 @@ private:
     }
 
     void ResetStage() {
+        selectedStage = std::max(0, std::min(save.selectedStage, save.unlockedStage - 1));
+        currentLevel = BattleLevelIndexForStage(selectedStage);
         heroesDef = BuildHeroes();
         state = GameState::Playing;
         selectedSlot = -1;
@@ -704,16 +1353,52 @@ private:
         cannonCooldown = 0.0f;
         kingCharge = 4;
         resultHandled = false;
+        const StageInfo& stage = StageAt(selectedStage);
         int levelNo = currentLevel + 1;
+        float stageScale = std::sqrt(std::max(1.0f, stage.recommendedPower / 100.0f));
         wallMaxHp = 5400 + levelNo * 200;
-        globalDamage += save.equipmentLevel * 0.075f;
-        globalAttackSpeed += save.equipmentLevel * 0.025f;
-        controlBonus += save.totemLevel * 0.08f;
-        poisonBonus += save.totemLevel * 0.08f;
-        bossDamage += save.totemLevel * 0.05f;
-        wallMaxHp += save.cloakLevel * 260;
-        wallRegen += save.cloakLevel * 0.18f;
-        summonDiscount = std::min(0.42f, summonDiscount + save.cloakLevel * 0.012f);
+        int lineupAttack = 0;
+        int lineupLife = 0;
+        for (int id : save.lineup) {
+            lineupAttack += HeroAttack(id);
+            lineupLife += HeroLife(id);
+        }
+        globalDamage += lineupAttack / 650.0f;
+        wallMaxHp += lineupLife / 2;
+        wallMaxHp = static_cast<int>(wallMaxHp * (1.0f + TalentLevel(1, 0) * 0.05f));
+        globalDamage *= 1.0f + TalentLevel(0, 0) * 0.03f;
+        globalDamage *= 1.0f + save.equipLevel[0] * 0.018f;
+        globalAttackSpeed += save.equipLevel[2] * 0.008f;
+        if (save.equipLevel[0] >= 5) globalDamage *= 1.05f;
+        if (save.equipLevel[0] >= 10) bossDamage += 0.05f;
+        if (save.equipLevel[0] >= 15) globalDamage *= 1.03f;
+        if (save.equipLevel[1] >= 5) wallMaxHp = static_cast<int>(wallMaxHp * 1.05f);
+        if (save.equipLevel[3] >= 15 && CountDifferentJobs() >= 3) {
+            globalDamage *= 1.05f;
+            wallMaxHp = static_cast<int>(wallMaxHp * 1.05f);
+        }
+        controlBonus += TalentLevel(3, 1) * 0.05f;
+        bossDamage += TalentLevel(0, 2) * 0.08f + TalentLevel(3, 2) * 0.05f;
+        wallRegen += TalentLevel(1, 2) * 0.12f;
+        if (HasRole(RoleKind::ShieldGuard)) wallMaxHp = static_cast<int>(wallMaxHp * (1.12f + save.heroStar[2] * 0.03f));
+        if (HasRole(RoleKind::NaturePriest)) {
+            globalDamage *= save.heroStar[5] >= 3 ? 1.08f : 1.04f;
+            wallRegen += 0.28f + save.heroStar[5] * 0.05f;
+        }
+        if (HasRole(RoleKind::FrostArcher)) controlBonus += 0.18f + save.heroStar[1] * 0.04f;
+        if (HasRole(RoleKind::Berserker) && stage.type == StageType::Boss) bossDamage += 0.24f + save.heroStar[4] * 0.05f;
+        wallMaxHp = static_cast<int>(wallMaxHp * std::max(0.72f, 1.0f - (stageScale - 1.0f) * 0.03f));
+        globalDamage *= std::max(0.35f, 1.0f / (0.82f + (stageScale - 1.0f) * 0.11f));
+
+        // Keep legacy cultivation values compatible with older save files, but the new pages are the primary loop.
+        globalDamage += save.equipmentLevel * 0.035f;
+        globalAttackSpeed += save.equipmentLevel * 0.012f;
+        controlBonus += save.totemLevel * 0.03f;
+        poisonBonus += save.totemLevel * 0.03f;
+        bossDamage += save.totemLevel * 0.02f;
+        wallMaxHp += save.cloakLevel * 120;
+        wallRegen += save.cloakLevel * 0.08f;
+        summonDiscount = std::min(0.42f, summonDiscount + save.cloakLevel * 0.006f);
         int supportIdx = std::max(0, std::min(kSupportCount - 1, save.activeSupport));
         int copies = std::max(1, save.supportCopies[supportIdx]);
         float supportValue = supports.empty() ? 0.0f : supports[supportIdx].baseValue + supports[supportIdx].perCopy * (copies - 1);
@@ -739,16 +1424,28 @@ private:
             }
         }
         wallHp = wallMaxHp;
-        coins = 80 + levelNo * 4;
+        coins = 80 + stage.chapter * 8 + stage.local * 3;
         summonCost = 45;
         upgradeCost = 100;
         slots = {};
-        slots[2] = Hero{true, 0, 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
-        slots[3] = Hero{true, 1, 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
-        slots[4] = Hero{true, 0, 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
-        slots[6] = Hero{true, 5, 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
+        slots[2] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[0]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
+        slots[3] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[1]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
+        slots[4] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[0]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
+        slots[6] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[2]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
         StartWave();
         ShowToast(u8"点击或拖拽相同英雄进行 2 合 1");
+    }
+
+    int MetaRoleToHeroType(RoleKind kind) const {
+        switch (kind) {
+            case RoleKind::FireMage: return 17;
+            case RoleKind::FrostArcher: return 16;
+            case RoleKind::ShieldGuard: return 11;
+            case RoleKind::ThunderWarlock: return 15;
+            case RoleKind::Berserker: return 10;
+            case RoleKind::NaturePriest: return 26;
+        }
+        return 5;
     }
 
     void StartWave() {
@@ -788,7 +1485,8 @@ private:
         EnemyKind kind = PickEnemyKind();
         int levelNo = currentLevel + 1;
         float wavePressure = 1.0f + wave * 0.17f + std::max(0, wave - 4) * 0.08f;
-        float levelPressure = 1.0f + currentLevel * 0.055f;
+        float stagePressure = 1.0f + selectedStage * 0.038f + StageAt(selectedStage).chapter * 0.08f;
+        float levelPressure = (1.0f + currentLevel * 0.055f) * stagePressure;
         float baseHp = (92.0f + wave * 32.0f + levelNo * 24.0f) * levels[currentLevel].hpScale * wavePressure * levelPressure;
         float speed = (23.0f + wave * 1.5f + levelNo * 0.4f) * levels[currentLevel].speedScale;
         float radius = 16.0f;
@@ -846,30 +1544,70 @@ private:
         if (!pressed) return;
 
         if (state == GameState::Lobby) {
+            if (PointIn(cityRecommendButton, mouse)) {
+                FollowRecommendation();
+                return;
+            }
             if (PointIn(adventureButton, mouse)) {
                 state = GameState::StageSelect;
                 return;
             }
-            if (PointIn(metaMenuButton, mouse)) {
-                state = GameState::Meta;
+            if (PointIn(cityHeroesButton, mouse)) {
+                state = GameState::Heroes;
+                return;
+            }
+            if (PointIn(cityEquipmentButton, mouse)) {
+                GoSystem(GameState::Equipment);
+                return;
+            }
+            if (PointIn(cityTalentsButton, mouse)) {
+                GoSystem(GameState::Talents);
+                return;
+            }
+            if (PointIn(cityLineupButton, mouse)) {
+                GoSystem(GameState::Lineup);
                 return;
             }
         }
 
         if (state == GameState::StageSelect) {
-            if (PointIn(prevStageButton, mouse)) {
-                currentLevel = (currentLevel + save.unlockedLevel - 1) % save.unlockedLevel;
+            if (PointIn(mapPrev, mouse)) {
+                selectedStage = std::max(0, selectedStage - 1);
+                save.selectedStage = selectedStage;
+                currentLevel = BattleLevelIndexForStage(selectedStage);
                 return;
             }
-            if (PointIn(nextStageButton, mouse)) {
-                currentLevel = (currentLevel + 1) % save.unlockedLevel;
+            if (PointIn(mapNext, mouse)) {
+                selectedStage = std::min(save.unlockedStage - 1, selectedStage + 1);
+                save.selectedStage = selectedStage;
+                currentLevel = BattleLevelIndexForStage(selectedStage);
+                return;
+            }
+            for (int i = 0; i < kStagesPerChapter; ++i) {
+                Rectangle node = StageNodeRect(i);
+                if (PointIn(node, mouse)) {
+                    int chapterStart = (stages[selectedStage].chapter - 1) * kStagesPerChapter;
+                    int idx = chapterStart + i;
+                    if (idx < save.unlockedStage) {
+                        selectedStage = idx;
+                        save.selectedStage = selectedStage;
+                        currentLevel = BattleLevelIndexForStage(selectedStage);
+                    } else {
+                        ShowToast(u8"请先通关前置关卡");
+                    }
+                    return;
+                }
+            }
+            if (PointIn(navMain, mouse)) {
+                GoSystem(GameState::Chests);
                 return;
             }
             if (PointIn(backButton, mouse)) {
                 state = GameState::Lobby;
                 return;
             }
-            if (PointIn(startButton, mouse)) {
+            if (PointIn(mapChallenge, mouse) || PointIn(startButton, mouse)) {
+                save.selectedStage = selectedStage;
                 ResetStage();
                 return;
             }
@@ -906,25 +1644,153 @@ private:
             }
         }
 
+        if (state == GameState::Heroes) {
+            for (int i = 0; i < kMetaHeroCount; ++i) {
+                if (PointIn({28.0f, 116.0f + i * 54.0f, 132.0f, 46.0f}, mouse)) {
+                    selectedHero = i;
+                    return;
+                }
+            }
+            if (PointIn({188, 680, 96, 46}, mouse)) {
+                TryUpgradeHero(selectedHero);
+                return;
+            }
+            if (PointIn({300, 680, 96, 46}, mouse)) {
+                TryStarHero(selectedHero);
+                return;
+            }
+            if (PointIn(navMain, mouse)) {
+                GoSystem(GameState::Lineup);
+                return;
+            }
+            if (PointIn(navBack, mouse)) {
+                state = GameState::Lobby;
+                return;
+            }
+        }
+
+        if (state == GameState::Equipment) {
+            for (int i = 0; i < kEquipmentSlotCount; ++i) {
+                if (PointIn({34.0f, 144.0f + i * 92.0f, 362.0f, 78.0f}, mouse)) {
+                    selectedEquip = i;
+                    return;
+                }
+            }
+            if (PointIn(navMain, mouse)) {
+                TryUpgradeEquip(selectedEquip);
+                return;
+            }
+            if (PointIn(navBack, mouse)) {
+                state = GameState::Lobby;
+                return;
+            }
+        }
+
+        if (state == GameState::Talents) {
+            for (int i = 0; i < kTalentCount; ++i) {
+                if (PointIn(TalentNodeRect(i), mouse)) {
+                    selectedTalent = i;
+                    return;
+                }
+            }
+            if (PointIn(navMain, mouse)) {
+                TryUpgradeTalent(selectedTalent);
+                return;
+            }
+            if (PointIn(navBack, mouse)) {
+                state = GameState::Lobby;
+                return;
+            }
+        }
+
+        if (state == GameState::Lineup) {
+            for (int i = 0; i < kLineupSlots; ++i) {
+                if (PointIn({34.0f + i * 128.0f, 148, 104, 72}, mouse)) {
+                    selectedLineupSlot = i;
+                    return;
+                }
+            }
+            for (int i = 0; i < kMetaHeroCount; ++i) {
+                if (PointIn({34.0f, 370.0f + i * 58.0f, 362.0f, 48.0f}, mouse)) {
+                    TrySetLineup(i);
+                    return;
+                }
+            }
+            if (PointIn(navMain, mouse)) {
+                ShowToast(u8"阵容已保存");
+                return;
+            }
+            if (PointIn(navBack, mouse)) {
+                state = GameState::Lobby;
+                return;
+            }
+        }
+
+        if (state == GameState::Chests) {
+            int chapter = stages[selectedStage].chapter - 1;
+            for (int i = 0; i < 3; ++i) {
+                if (PointIn({42.0f, 250.0f + i * 132.0f, 346.0f, 104.0f}, mouse)) {
+                    TryClaimChest(chapter, i);
+                    return;
+                }
+            }
+            if (PointIn(navMain, mouse)) {
+                state = GameState::StageSelect;
+                return;
+            }
+            if (PointIn(navBack, mouse)) {
+                state = GameState::Lobby;
+                return;
+            }
+        }
+
         if (state == GameState::Victory) {
-            Rectangle next{95, 702, 240, 58};
-            Rectangle menu{128, 776, 174, 45};
+            Rectangle next{52, 720, 150, 48};
+            Rectangle grow{226, 720, 150, 48};
+            Rectangle menu{52, 784, 150, 44};
+            Rectangle retry{226, 784, 150, 44};
             if (PointIn(next, mouse)) {
-                currentLevel = std::min(save.unlockedLevel - 1, currentLevel + 1);
+                if (currentRunResult.victory && currentRunResult.stageIndex + 1 < save.unlockedStage) {
+                    selectedStage = currentRunResult.stageIndex + 1;
+                    save.selectedStage = selectedStage;
+                    currentLevel = BattleLevelIndexForStage(selectedStage);
+                }
                 ResetStage();
+                return;
+            }
+            if (PointIn(grow, mouse)) {
+                state = GameState::Heroes;
                 return;
             }
             if (PointIn(menu, mouse)) {
                 state = GameState::StageSelect;
                 return;
             }
+            if (PointIn(retry, mouse)) {
+                selectedStage = currentRunResult.stageIndex;
+                save.selectedStage = selectedStage;
+                ResetStage();
+                return;
+            }
         }
 
         if (state == GameState::Defeat) {
-            Rectangle retry{95, 702, 240, 58};
-            Rectangle menu{128, 776, 174, 45};
+            Rectangle retry{226, 784, 150, 44};
+            Rectangle grow{226, 720, 150, 48};
+            Rectangle menu{52, 784, 150, 44};
+            Rectangle mapButton{52, 720, 150, 48};
             if (PointIn(retry, mouse)) {
+                selectedStage = currentRunResult.stageIndex;
+                save.selectedStage = selectedStage;
                 ResetStage();
+                return;
+            }
+            if (PointIn(grow, mouse)) {
+                state = SuggestedGrowthScreen(currentRunResult.failure);
+                return;
+            }
+            if (PointIn(mapButton, mouse)) {
+                state = GameState::StageSelect;
                 return;
             }
             if (PointIn(menu, mouse)) {
@@ -1021,7 +1887,7 @@ private:
         }
         coins -= cost;
         int slot = empty[RandInt(rng, 0, static_cast<int>(empty.size()) - 1)];
-        int type = RandInt(rng, 0, static_cast<int>(heroesDef.size()) - 1);
+        int type = PreferredSummonType();
         slots[slot] = Hero{true, type, 1, RandFloat(rng, 0.05f, 0.45f), 0.55f};
         summons++;
         summonCost = std::min(130, summonCost + 2 + summons / 5);
@@ -1066,6 +1932,14 @@ private:
         }
         PlaySfx(assets.merge);
         return true;
+    }
+
+    int PreferredSummonType() {
+        if (RandInt(rng, 0, 99) < 56) {
+            int metaId = save.lineup[RandInt(rng, 0, kLineupSlots - 1)];
+            return MetaRoleToHeroType(metaHeroes[metaId].kind);
+        }
+        return RandInt(rng, 0, static_cast<int>(heroesDef.size()) - 1);
     }
 
     void HandleSlotClick(int i) {
@@ -1226,59 +2100,104 @@ private:
     void HandleBattleEnd(bool victory) {
         if (resultHandled) return;
         resultHandled = true;
-        const LevelInfo& level = levels[currentLevel];
-        int reward = victory ? level.baseDustReward + highestStar * 10 + kills / 3 : 24 + kills * 2;
-        reward = static_cast<int>(std::round(reward * rewardBonus));
-        save.starDust += reward;
-        save.bestLevel = std::max(save.bestLevel, currentLevel + 1);
-        int parts = 0;
-        int runes = 0;
-        int silk = 0;
-        int tickets = 0;
-        std::string gearDrop;
+        const StageInfo& stage = StageAt(selectedStage);
+        currentRunResult = {};
+        currentRunResult.victory = victory;
+        currentRunResult.stageIndex = selectedStage;
+        currentRunResult.wallHp = std::max(0, wallHp);
+        currentRunResult.wallMax = wallMaxHp;
+        currentRunResult.failedWave = victory ? 0 : std::min(wave + 1, totalWaves);
+        currentRunResult.firstClear = save.stageStars[selectedStage] == 0;
         if (victory) {
+            currentRunResult.starDone[0] = true;
+            currentRunResult.starDone[1] = wallHp >= wallMaxHp * 0.50f;
+            currentRunResult.starDone[2] = StageSpecialStarDone(stage);
+            currentRunResult.stars = 1 + (currentRunResult.starDone[1] ? 1 : 0) + (currentRunResult.starDone[2] ? 1 : 0);
+            currentRunResult.reward = stage.baseReward;
+            ApplyRewardTalents(currentRunResult.reward);
+            if (currentRunResult.firstClear) currentRunResult.firstReward = stage.firstReward;
+            ApplyRewardTalents(currentRunResult.firstReward);
+            currentRunResult.totalReward = currentRunResult.reward + currentRunResult.firstReward;
+            save.resources += currentRunResult.totalReward;
+            save.stageStars[selectedStage] = std::max(save.stageStars[selectedStage], currentRunResult.stars);
+            save.highestCleared = std::max(save.highestCleared, selectedStage + 1);
+            save.bestLevel = std::max(save.bestLevel, save.highestCleared);
             save.victories++;
-            save.unlockedLevel = std::min(30, std::max(save.unlockedLevel, currentLevel + 2));
-            parts = level.materialReward + RandInt(rng, 0, 2);
-            runes = std::max(1, level.materialReward - 1 + RandInt(rng, 0, 1));
-            silk = std::max(1, level.materialReward - 1 + (currentLevel % 3 == 0 ? 1 : 0));
-            save.equipmentParts += parts;
-            save.totemRunes += runes;
-            save.cloakSilk += silk;
-            if (RandFloat(rng, 0.0f, 1.0f) < level.opportunityRate) {
-                tickets = 1;
-                save.gachaTickets += 1;
+            if (selectedStage + 1 >= save.unlockedStage && save.unlockedStage < kLevelCount) {
+                save.unlockedStage = selectedStage + 2;
+                currentRunResult.unlockedNext = true;
             }
-            float drop = RandFloat(rng, 0.0f, 1.0f);
-            if (drop < level.gearDropRate) {
-                float quality = RandFloat(rng, 0.0f, 1.0f);
-                if (quality < 0.08f + currentLevel * 0.004f) {
-                    save.mythicGear++;
-                    save.equipmentLevel += 1;
-                    gearDrop = u8"神话装备";
-                } else if (quality < 0.30f + currentLevel * 0.006f) {
-                    save.epicGear++;
-                    save.equipmentParts += 4;
-                    gearDrop = u8"史诗装备";
-                } else {
-                    save.rareGear++;
-                    save.equipmentParts += 2;
-                    gearDrop = u8"稀有装备";
-                }
-            }
+            if (stage.type == StageType::Boss && selectedStage + 1 < kLevelCount) currentRunResult.unlockedChapter = true;
+            save.unlockedLevel = std::min(30, std::max(save.unlockedLevel, std::min(30, save.unlockedStage)));
+            currentRunResult.mainContributor = MainContributorName();
+            currentRunResult.advice = VictoryAdvice(stage);
             PlaySfx(assets.victory);
         } else {
+            currentRunResult.failure = DiagnoseFailure(stage);
+            currentRunResult.advice = AdviceFor(currentRunResult.failure);
+            currentRunResult.reward = ScaleReward(stage.baseReward, FailureRatio(stage));
+            currentRunResult.reward.heroShard = 0;
+            currentRunResult.reward.talentPoint = 0;
+            currentRunResult.reward.diamond = 0;
+            ApplyRewardTalents(currentRunResult.reward);
+            currentRunResult.totalReward = currentRunResult.reward;
+            save.resources += currentRunResult.totalReward;
             PlaySfx(assets.defeat);
         }
-        std::stringstream loot;
-        loot << u8"星尘 +" << reward;
-        if (victory) {
-            loot << u8" · 碎片 +" << parts << u8" · 符文 +" << runes << u8" · 丝线 +" << silk;
-            if (tickets > 0) loot << u8" · 招募券 +" << tickets;
-            if (!gearDrop.empty()) loot << u8" · 掉落 " << gearDrop;
-        }
-        resultLoot = loot.str();
+        save.selectedStage = selectedStage;
+        resultLoot = ResourceText(currentRunResult.totalReward);
         SaveProgress();
+    }
+
+    void ApplyRewardTalents(ResourceBundle& reward) const {
+        reward.gold = static_cast<int>(reward.gold * (1.0f + TalentLevel(2, 0) * 0.05f) * rewardBonus);
+        reward.heroExp = static_cast<int>(reward.heroExp * (1.0f + TalentLevel(2, 1) * 0.05f) * rewardBonus);
+        reward.gearMat = static_cast<int>(reward.gearMat * (1.0f + TalentLevel(2, 2) * 0.05f) * rewardBonus);
+    }
+
+    float FailureRatio(const StageInfo& stage) const {
+        if (save.talentLevel[13] > 0) return 0.35f;
+        return stage.failRatio;
+    }
+
+    bool StageSpecialStarDone(const StageInfo& stage) const {
+        if (stage.type == StageType::Boss) return (HasRole(RoleKind::Berserker) || highestStar >= 3) && wallHp > wallMaxHp * 0.40f;
+        if (stage.type == StageType::Elite) return wallHp > wallMaxHp * 0.60f;
+        if (stage.enemy == EnemyType::Swarm) return HasRole(RoleKind::FireMage) || HasRole(RoleKind::ThunderWarlock) || highestStar >= 3;
+        if (stage.enemy == EnemyType::Swift) return HasRole(RoleKind::FrostArcher) || HasRole(RoleKind::ShieldGuard) || wallHp > wallMaxHp * 0.70f;
+        if (stage.enemy == EnemyType::Armored) return HasRole(RoleKind::Berserker) || highestStar >= 4;
+        return wallHp > wallMaxHp * 0.70f || merges >= 2;
+    }
+
+    FailureReason DiagnoseFailure(const StageInfo& stage) const {
+        if (stage.type == StageType::Boss && wave >= totalWaves - 2 && kills < 8 + selectedStage / 2) return FailureReason::Boss;
+        if (stage.enemy == EnemyType::Swarm && kills < 35 + selectedStage) return FailureReason::Clear;
+        if (stage.enemy == EnemyType::Swift) return FailureReason::Control;
+        if (wallHp <= 0 && wave <= totalWaves / 2) return FailureReason::Defense;
+        if (highestStar <= 2 && summons < 6) return FailureReason::Output;
+        return FailureReason::Output;
+    }
+
+    std::string VictoryAdvice(const StageInfo& stage) const {
+        if (HasChestReady() && SystemUnlocked(GameState::Chests)) return u8"章节宝箱已可领取，回地图领取奖励。";
+        if (AnyHeroCanStar()) return u8"你已有足够碎片，可以尝试给核心角色升星。";
+        if (stage.type == StageType::Boss) return u8"Boss 已击败，下一章会引入新的养成考验。";
+        return u8"继续挑战下一关，或回局外养成提升三星稳定性。";
+    }
+
+    std::string MainContributorName() const {
+        int bestSlot = -1;
+        int bestScore = -1;
+        for (const auto& h : slots) {
+            if (!h.active) continue;
+            int score = h.star * 100 + static_cast<int>(heroesDef[h.type].baseDamage);
+            if (score > bestScore) {
+                bestScore = score;
+                bestSlot = h.type;
+            }
+        }
+        if (bestSlot >= 0) return heroesDef[bestSlot].name;
+        return metaHeroes[save.lineup[0]].name;
     }
 
     void UpdateWave(float dt) {
@@ -1851,7 +2770,12 @@ private:
         }
         if (state == GameState::Lobby) DrawLobbyOverlay();
         if (state == GameState::StageSelect) DrawStageSelectOverlay();
-        if (state == GameState::Meta) DrawMetaOverlay();
+        if (state == GameState::Meta) DrawEquipmentOverlay();
+        if (state == GameState::Heroes) DrawHeroesOverlay();
+        if (state == GameState::Equipment) DrawEquipmentOverlay();
+        if (state == GameState::Talents) DrawTalentsOverlay();
+        if (state == GameState::Lineup) DrawLineupOverlay();
+        if (state == GameState::Chests) DrawChestsOverlay();
         if (state == GameState::Draft) DrawDraftOverlay();
         if (state == GameState::Paused) DrawPauseOverlay();
         if (state == GameState::Victory) DrawResultOverlay(true);
@@ -1881,7 +2805,7 @@ private:
         DrawCircle(72, 153, 17, C(255, 217, 97, 210));
         DrawStar({72, 153}, 12, C(255, 248, 190));
         DrawRectangleRounded({318, 130, 58, 46}, 0.18f, 10, C(31, 45, 56, 175));
-        text.centered(u8"30关", {318, 141, 58, 24}, 18, C(219, 238, 239, 190));
+        text.centered(u8"50关", {318, 141, 58, 24}, 18, C(219, 238, 239, 190));
     }
 
     void DrawBackground() {
@@ -2005,16 +2929,17 @@ private:
         DrawRectangleRounded({pill.x + 2, pill.y + 5, pill.width, pill.height}, 0.35f, 16, C(13, 20, 28, 90));
         DrawRectangleRounded(pill, 0.35f, 16, C(46, 61, 75, 220));
         DrawRectangleRounded({132, 103, 166, 32}, 0.45f, 14, C(34, 48, 63, 225));
+        const StageInfo& stage = StageAt(selectedStage);
         std::stringstream ss;
-        ss << (currentLevel + 1) << ". " << levels[currentLevel].name;
+        ss << stage.chapter << "-" << stage.local << " " << stage.name;
         text.centeredStroke(ss.str().c_str(), {84, 58, 262, 44}, 33, C(245, 250, 244), C(38, 49, 60));
         std::stringstream waveText;
         waveText << u8"波次：" << std::min(wave + 1, totalWaves) << "/" << totalWaves;
         text.centered(waveText.str().c_str(), {132, 103, 166, 30}, 23, C(238, 245, 247));
 
         Rectangle trait{126, 139, 178, 25};
-        DrawRectangleRounded(trait, 0.45f, 10, Fade(levels[currentLevel].accent, 0.18f));
-        text.centered(levels[currentLevel].trait.c_str(), trait, 16, C(221, 237, 239));
+        DrawRectangleRounded(trait, 0.45f, 10, Fade(stage.accent, 0.18f));
+        text.centered((stage.enemyName + u8" · " + stage.tip).c_str(), trait, 16, C(221, 237, 239));
 
         DrawSmallMonsterIcon(108, 78, 0.62f, true);
 
@@ -2553,85 +3478,128 @@ private:
         text.centered(u8"返回大厅", backButton, 18, C(238, 247, 246));
     }
 
+    void DrawButton(Rectangle r, const char* label, Color color, bool enabled = true) {
+        DrawRectangleRounded({r.x + 2, r.y + 4, r.width, r.height}, 0.26f, 12, C(4, 9, 14, 92));
+        DrawRectangleRounded(r, 0.26f, 12, enabled ? color : C(76, 84, 91));
+        text.centered(label, r, 18, enabled ? C(255, 255, 238) : C(180, 190, 194));
+    }
+
+    void DrawPanel(Rectangle r, Color color = C(35, 51, 64, 225)) {
+        DrawRectangleRounded({r.x + 2, r.y + 5, r.width, r.height}, 0.12f, 12, C(5, 10, 15, 88));
+        DrawRectangleRounded(r, 0.12f, 12, color);
+    }
+
+    void DrawResourceBar() {
+        Rectangle r{26, 214, 378, 42};
+        DrawRectangleRounded(r, 0.28f, 12, C(20, 31, 42, 228));
+        std::vector<std::pair<std::string, int>> items = {
+            {u8"金", save.resources.gold},
+            {u8"验", save.resources.heroExp},
+            {u8"材", save.resources.gearMat},
+            {u8"碎", save.resources.heroShard},
+            {u8"天", save.resources.talentPoint},
+            {u8"钻", save.resources.diamond},
+        };
+        for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+            float x = 38.0f + i * 61.0f;
+            DrawCircle(static_cast<int>(x), 235, 11, i == 0 ? C(245, 196, 85) : (i == 5 ? C(119, 218, 238) : C(165, 196, 206)));
+            text.centered(items[i].first.c_str(), {x - 9, 226, 18, 18}, 12, C(34, 42, 46));
+            text.draw(std::to_string(items[i].second).c_str(), {x + 15, 226}, 12, C(236, 246, 243));
+        }
+    }
+
+    void DrawWrapped(const std::string& s, Rectangle box, float size, Color color) {
+        const int maxChars = std::max(8, static_cast<int>(box.width / (size * 0.55f)));
+        int line = 0;
+        std::string current;
+        int charCount = 0;
+        for (size_t i = 0; i < s.size();) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            size_t len = c < 0x80 ? 1 : (c < 0xE0 ? 2 : (c < 0xF0 ? 3 : 4));
+            if (i + len > s.size()) len = 1;
+            current.append(s.substr(i, len));
+            i += len;
+            charCount++;
+            if (charCount >= maxChars || i >= s.size()) {
+                text.draw(current.c_str(), {box.x, box.y + line * (size + 5)}, size, color);
+                current.clear();
+                charCount = 0;
+                line++;
+                if (box.y + line * (size + 5) > box.y + box.height - size) break;
+            }
+        }
+    }
+
     void DrawLobbyOverlay() {
         Rectangle page{20, 104, 390, 724};
-        text.centeredStroke(u8"永远的蔚蓝星球", {page.x, 126, page.width, 42}, 31, C(255, 252, 236), C(25, 33, 42));
-        std::stringstream progress;
-        progress << u8"已解锁 " << save.unlockedLevel << u8"/30 · 星尘 " << save.starDust << u8" · 招募券 " << save.gachaTickets;
-        text.centered(progress.str().c_str(), {page.x + 24, 166, page.width - 48, 24}, 16, C(221, 238, 241));
+        text.centeredStroke(u8"主城首页", {page.x, 124, page.width, 40}, 31, C(255, 252, 236), C(25, 33, 42));
+        text.centered(u8"局外养成负责变强，进入关卡后仍是实时随机合成塔防", {page.x + 18, 164, page.width - 36, 22}, 13, C(221, 238, 241));
+        DrawResourceBar();
 
-        Rectangle status{46, 246, 338, 122};
-        DrawRectangleRounded({status.x + 2, status.y + 5, status.width, status.height}, 0.16f, 12, C(5, 10, 16, 80));
-        DrawRectangleRounded(status, 0.16f, 12, C(31, 45, 56, 222));
-        std::stringstream stageHint;
-        stageHint << u8"闯关目标：第 " << (currentLevel + 1) << u8" 关 · " << levels[currentLevel].name;
-        text.centered(stageHint.str().c_str(), {status.x + 14, status.y + 18, status.width - 28, 22}, 17, C(255, 231, 130));
-        int idx = std::max(0, std::min(kSupportCount - 1, save.activeSupport));
-        std::stringstream supportLine;
-        supportLine << u8"当前支援：" << supports[idx].name << u8" +" << std::max(0, save.supportCopies[idx] - 1);
-        text.centered(supportLine.str().c_str(), {status.x + 14, status.y + 50, status.width - 28, 20}, 16, C(209, 229, 233));
-        std::stringstream metaLine;
-        metaLine << u8"装备 " << save.equipmentLevel << u8" · 图腾 " << save.totemLevel << u8" · 披风 " << save.cloakLevel;
-        text.centered(metaLine.str().c_str(), {status.x + 14, status.y + 80, status.width - 28, 20}, 15, C(193, 214, 221));
+        const StageInfo& next = stages[std::min(save.unlockedStage - 1, kLevelCount - 1)];
+        Rectangle status{34, 278, 362, 134};
+        DrawPanel(status, C(31, 45, 56, 232));
+        text.draw(u8"当前进度", {status.x + 18, status.y + 16}, 19, C(255, 236, 142));
+        std::stringstream p;
+        p << u8"最高通关：" << save.highestCleared << "/" << kLevelCount << u8"   主阵容战力：" << LineupPower();
+        text.draw(p.str().c_str(), {status.x + 18, status.y + 48}, 14, C(213, 230, 234));
+        std::stringstream nextLine;
+        nextLine << u8"下一关：" << next.chapter << "-" << next.local << u8" " << next.name << u8" · 推荐 " << next.recommendedPower;
+        text.draw(nextLine.str().c_str(), {status.x + 18, status.y + 76}, 14, C(213, 230, 234));
+        text.draw(PowerHint(LineupPower(), next.recommendedPower).c_str(), {status.x + 18, status.y + 104}, 14, C(255, 231, 128));
 
-        Rectangle summary{46, 400, 338, 142};
-        DrawRectangleRounded(summary, 0.16f, 12, C(42, 59, 70, 205));
-        text.centered(u8"局外大厅", {summary.x + 16, summary.y + 18, summary.width - 32, 24}, 22, C(247, 252, 242));
-        std::stringstream bestLine;
-        bestLine << u8"最佳关卡 " << std::max(1, save.bestLevel + 1) << u8" · 胜利 " << save.victories;
-        text.centered(bestLine.str().c_str(), {summary.x + 18, summary.y + 54, summary.width - 36, 20}, 15, C(201, 222, 227));
-        text.centered(u8"星尘与材料用于局外养成", {summary.x + 18, summary.y + 84, summary.width - 36, 20}, 15, C(201, 222, 227));
+        Rectangle rec{34, 432, 362, 98};
+        DrawPanel(rec, C(41, 59, 70, 232));
+        text.draw(u8"推荐行动", {rec.x + 18, rec.y + 16}, 19, C(255, 236, 142));
+        DrawWrapped(NextRecommendation(), {rec.x + 18, rec.y + 46, rec.width - 36, 26}, 16, C(236, 247, 244));
+        DrawButton(cityRecommendButton, u8"执行推荐行动", C(91, 156, 198));
 
-        DrawRectangleRounded(adventureButton, 0.24f, 14, C(88, 179, 83));
-        DrawRectangleRounded({adventureButton.x + 8, adventureButton.y + 8, adventureButton.width - 16, 12}, 0.4f, 10, C(191, 252, 128, 105));
-        text.centered(u8"开始闯关", adventureButton, 27, C(255, 255, 239));
-        text.centered(u8"选择关卡并进入战斗", {adventureButton.x + 14, adventureButton.y + 42, adventureButton.width - 28, 20}, 14, C(223, 244, 224));
-
-        DrawRectangleRounded(metaMenuButton, 0.24f, 14, C(91, 110, 132));
-        DrawRectangleRounded({metaMenuButton.x + 8, metaMenuButton.y + 8, metaMenuButton.width - 16, 12}, 0.4f, 10, C(184, 211, 229, 85));
-        text.centered(u8"局外养成", {metaMenuButton.x, metaMenuButton.y + 8, metaMenuButton.width, 28}, 24, C(249, 251, 238));
-        text.centered(u8"升级装备、图腾、披风与支援", {metaMenuButton.x + 14, metaMenuButton.y + 38, metaMenuButton.width - 28, 18}, 13, C(219, 232, 238));
+        DrawButton(adventureButton, u8"开始闯关", C(88, 179, 83));
+        DrawButton(cityHeroesButton, AnyHeroCanUpgrade() || AnyHeroCanStar() ? u8"角色养成!" : u8"角色养成", C(91, 110, 132));
+        DrawButton(cityEquipmentButton, SystemUnlocked(GameState::Equipment) ? (AnyEquipCanUpgrade() ? u8"装备强化!" : u8"装备强化") : u8"装备锁定", C(126, 105, 160), SystemUnlocked(GameState::Equipment));
+        DrawButton(cityTalentsButton, SystemUnlocked(GameState::Talents) ? (AnyTalentCanUpgrade() ? u8"天赋树!" : u8"天赋树") : u8"天赋锁定", C(126, 139, 82), SystemUnlocked(GameState::Talents));
+        DrawButton(cityLineupButton, SystemUnlocked(GameState::Lineup) ? u8"阵容编辑" : u8"阵容锁定", C(153, 109, 83), SystemUnlocked(GameState::Lineup));
     }
 
     void DrawStageSelectOverlay() {
         Rectangle page{20, 104, 390, 724};
-        text.centered(u8"开始闯关", {page.x, 128, page.width, 28}, 24, C(229, 244, 247));
+        const StageInfo& stage = stages[selectedStage];
+        std::stringstream sub;
+        sub << u8"第 " << stage.chapter << u8" 章 · " << stage.chapterName;
+        text.centeredStroke(u8"闯关地图", {page.x, 122, page.width, 34}, 29, C(255, 252, 236), C(25, 33, 42));
+        text.centered(sub.str().c_str(), {page.x, 158, page.width, 22}, 16, C(207, 228, 233));
+        DrawResourceBar();
+        int chapterStart = (stage.chapter - 1) * kStagesPerChapter;
+        for (int i = 0; i < kStagesPerChapter; ++i) {
+            int idx = chapterStart + i;
+            Rectangle node = StageNodeRect(i);
+            bool unlocked = idx < save.unlockedStage;
+            bool selected = idx == selectedStage;
+            const StageInfo& s = stages[idx];
+            Color body = !unlocked ? C(76, 84, 91) : (s.type == StageType::Boss ? C(176, 91, 86) : (s.type == StageType::Elite ? C(164, 129, 76) : C(82, 145, 160)));
+            if (selected) DrawCircle(static_cast<int>(node.x + node.width / 2), static_cast<int>(node.y + node.height / 2), 36, C(255, 234, 125, 80));
+            DrawRectangleRounded(node, 0.24f, 12, body);
+            text.centered(std::to_string(s.local).c_str(), node, 22, C(255, 255, 240));
+            if (!unlocked) text.centered(u8"锁", {node.x, node.y + 30, node.width, 18}, 13, C(225, 230, 231));
+            else if (save.stageStars[idx] > 0) text.centered(StarCountText(save.stageStars[idx]).c_str(), {node.x, node.y + 34, node.width, 16}, 12, C(255, 238, 116));
+        }
+        Rectangle detail{34, 466, 362, 204};
+        DrawPanel(detail);
         std::stringstream title;
-        title << u8"第 " << (currentLevel + 1) << u8" 关";
-        text.centered(title.str().c_str(), {page.x, 192, page.width, 22}, 21, C(198, 222, 229));
-        text.centeredStroke(levels[currentLevel].name.c_str(), {page.x, 222, page.width, 44}, 34, C(255, 252, 237), C(27, 35, 44));
-        Rectangle traitBox{48, 280, 334, 44};
-        DrawRectangleRounded(traitBox, 0.45f, 14, Fade(levels[currentLevel].accent, 0.28f));
-        text.centered(levels[currentLevel].trait.c_str(), traitBox, 18, C(232, 245, 247));
-        Rectangle savePill{48, 350, 334, 36};
-        DrawRectangleRounded(savePill, 0.45f, 12, C(30, 43, 54, 205));
-        std::stringstream saveLine;
-        saveLine << u8"推荐战力：装备 " << save.equipmentLevel << u8" / 图腾 " << save.totemLevel << u8" / 披风 " << save.cloakLevel;
-        text.centered(saveLine.str().c_str(), savePill, 17, C(255, 231, 131));
-        std::stringstream unlockLine;
-        unlockLine << u8"已解锁 " << save.unlockedLevel << u8"/30 · 胜利可得材料、装备和招募券";
-        text.centered(unlockLine.str().c_str(), {48, 402, 334, 24}, 15, C(198, 220, 226));
-        Rectangle dropBox{48, 450, 334, 120};
-        DrawRectangleRounded(dropBox, 0.16f, 12, C(34, 49, 61, 205));
-        std::stringstream drops;
-        drops << u8"掉率 " << static_cast<int>(levels[currentLevel].gearDropRate * 100.0f) << u8"% · 奖励星尘 " << levels[currentLevel].baseDustReward;
-        text.centered(drops.str().c_str(), {dropBox.x + 12, dropBox.y + 18, dropBox.width - 24, 20}, 15, C(255, 230, 126));
-        std::stringstream materials;
-        materials << u8"材料 +" << levels[currentLevel].materialReward << u8" · 怪物密度 +" << levels[currentLevel].densityBonus;
-        text.centered(materials.str().c_str(), {dropBox.x + 12, dropBox.y + 48, dropBox.width - 24, 20}, 15, C(207, 226, 231));
-        text.centered(u8"胜利后解锁下一关", {dropBox.x + 12, dropBox.y + 78, dropBox.width - 24, 20}, 15, C(188, 212, 219));
-
-        DrawRectangleRounded(prevStageButton, 0.28f, 12, C(75, 92, 104));
-        DrawRectangleRounded(nextStageButton, 0.28f, 12, C(75, 92, 104));
-        text.centered("<", prevStageButton, 26, C(246, 250, 245));
-        text.centered(">", nextStageButton, 26, C(246, 250, 245));
-        text.centered(u8"选择关卡", {145, 604, 140, 28}, 21, C(246, 250, 245));
-
-        DrawRectangleRounded(startButton, 0.38f, 14, C(93, 190, 85));
-        DrawRectangleRounded({startButton.x + 5, startButton.y + 5, startButton.width - 10, 12}, 0.4f, 10, C(189, 250, 126, 115));
-        text.centered(u8"开始防守", startButton, 25, C(255, 255, 240));
-
-        DrawBackButton();
+        title << stage.chapter << "-" << stage.local << "  " << stage.name << "  " << StageTypeName(stage.type);
+        text.draw(title.str().c_str(), {detail.x + 16, detail.y + 16}, 18, C(255, 236, 142));
+        text.draw((u8"敌人：" + stage.enemyName + u8"  推荐：" + RecommendedLineup(stage.enemy)).c_str(), {detail.x + 16, detail.y + 50}, 15, C(216, 232, 236));
+        std::stringstream pow;
+        pow << u8"当前战力 " << LineupPower() << u8" / 推荐 " << stage.recommendedPower;
+        text.draw(pow.str().c_str(), {detail.x + 16, detail.y + 78}, 15, C(216, 232, 236));
+        text.draw(PowerHint(LineupPower(), stage.recommendedPower).c_str(), {detail.x + 16, detail.y + 106}, 14, C(255, 231, 130));
+        text.draw((u8"奖励：" + ResourceText(stage.baseReward)).c_str(), {detail.x + 16, detail.y + 134}, 13, C(202, 222, 226));
+        text.draw(stage.tip.c_str(), {detail.x + 16, detail.y + 162}, 14, C(194, 217, 222));
+        DrawButton(mapPrev, u8"上一关", C(78, 96, 108), selectedStage > 0);
+        DrawButton(mapNext, u8"下一关", C(78, 96, 108), selectedStage < save.unlockedStage - 1);
+        DrawButton(mapChallenge, u8"开始防守", C(90, 178, 85));
+        DrawButton(backButton, u8"返回", C(80, 96, 108));
+        DrawButton(navMain, SystemUnlocked(GameState::Chests) ? u8"章节宝箱" : u8"宝箱锁定", C(145, 110, 76), SystemUnlocked(GameState::Chests));
     }
 
     void DrawMetaOverlay() {
@@ -2697,6 +3665,192 @@ private:
         text.centered(gacha.str().c_str(), gachaButton, 17, C(255, 239, 172));
     }
 
+    void DrawHeroesOverlay() {
+        Rectangle page{20, 104, 390, 724};
+        text.centeredStroke(u8"角色养成", {page.x, 122, page.width, 34}, 28, C(255, 252, 236), C(25, 33, 42));
+        text.centered(u8"6 个局外角色会影响局内初始阵容和全局战斗加成", {page.x + 16, 156, page.width - 32, 20}, 13, C(207, 228, 233));
+        DrawResourceBar();
+        for (int i = 0; i < kMetaHeroCount; ++i) {
+            Rectangle card{28.0f, 276.0f + i * 54.0f, 132.0f, 46.0f};
+            DrawRectangleRounded(card, 0.18f, 10, i == selectedHero ? C(82, 112, 128) : C(47, 63, 76));
+            DrawCircle(static_cast<int>(card.x + 21), static_cast<int>(card.y + 23), 14, metaHeroes[i].main);
+            text.draw(metaHeroes[i].name.c_str(), {card.x + 42, card.y + 8}, 14, C(241, 248, 244));
+            std::stringstream ls;
+            ls << "Lv." << save.heroLevel[i] << " " << save.heroStar[i] << u8"星";
+            text.draw(ls.str().c_str(), {card.x + 42, card.y + 27}, 12, C(255, 228, 128));
+        }
+        const auto& h = metaHeroes[selectedHero];
+        Rectangle d{176, 276, 220, 384};
+        DrawPanel(d);
+        text.centered(h.name.c_str(), {d.x, d.y + 14, d.width, 28}, 23, C(255, 236, 142));
+        text.centered((h.rarity + u8" · " + h.job + u8" · " + h.role).c_str(), {d.x, d.y + 44, d.width, 20}, 13, C(203, 224, 230));
+        std::stringstream attr;
+        attr << u8"攻 " << HeroAttack(selectedHero) << u8"  生命 " << HeroLife(selectedHero) << u8"  战力 " << HeroPower(selectedHero);
+        text.draw(attr.str().c_str(), {d.x + 14, d.y + 78}, 12, C(226, 239, 238));
+        text.draw((u8"技能：" + h.skillName).c_str(), {d.x + 14, d.y + 112}, 15, C(255, 236, 142));
+        DrawWrapped(h.skillDesc, {d.x + 14, d.y + 136, d.width - 28, 48}, 12, C(207, 226, 231));
+        text.draw(u8"3星 / 5星变化", {d.x + 14, d.y + 198}, 14, C(255, 236, 142));
+        DrawWrapped(h.star3Desc + u8"；" + h.star5Desc, {d.x + 14, d.y + 222, d.width - 28, 56}, 12, C(205, 224, 229));
+        DrawWrapped(u8"推荐：" + h.recommendation, {d.x + 14, d.y + 292, d.width - 28, 36}, 12, C(255, 228, 128));
+        std::stringstream cost;
+        if (save.heroLevel[selectedHero] >= StarCap(save.heroStar[selectedHero])) cost << u8"升级：需要升星";
+        else cost << u8"升 金" << HeroUpgradeGoldCost(save.heroLevel[selectedHero]) << u8" 经验" << HeroUpgradeExpCost(save.heroLevel[selectedHero]);
+        text.draw(cost.str().c_str(), {d.x + 14, d.y + 344}, 11, C(207, 226, 231));
+        int star = save.heroStar[selectedHero];
+        std::stringstream starCost;
+        if (star >= 5) starCost << u8"升星：已满星";
+        else starCost << u8"星 碎" << HeroStarShardCost(star) << u8" 金" << HeroStarGoldCost(star);
+        text.draw(starCost.str().c_str(), {d.x + 14, d.y + 364}, 11, C(207, 226, 231));
+        DrawButton({188, 680, 96, 46}, u8"升级", C(91, 156, 198));
+        DrawButton({300, 680, 96, 46}, u8"升星", C(160, 112, 75));
+        DrawButton(navBack, u8"返回", C(80, 96, 108));
+        DrawButton(navMain, SystemUnlocked(GameState::Lineup) ? u8"阵容编辑" : u8"阵容锁定", C(91, 126, 166), SystemUnlocked(GameState::Lineup));
+    }
+
+    void DrawEquipmentOverlay() {
+        Rectangle page{20, 104, 390, 724};
+        text.centeredStroke(u8"装备强化", {page.x, 122, page.width, 34}, 28, C(255, 252, 236), C(25, 33, 42));
+        text.centered(u8"4 个槽位，每 5 级解锁真实战斗效果", {page.x + 16, 156, page.width - 32, 20}, 13, C(207, 228, 233));
+        DrawResourceBar();
+        for (int i = 0; i < kEquipmentSlotCount; ++i) {
+            Rectangle r{34.0f, 276.0f + i * 82.0f, 362.0f, 68.0f};
+            DrawPanel(r, i == selectedEquip ? C(64, 82, 94, 238) : C(43, 59, 70, 230));
+            DrawCircle(static_cast<int>(r.x + 32), static_cast<int>(r.y + 34), 20, equipment[i].accent);
+            std::stringstream title;
+            title << equipment[i].name << " Lv." << save.equipLevel[i] << "/20";
+            text.draw(title.str().c_str(), {r.x + 70, r.y + 11}, 17, C(255, 236, 142));
+            text.draw(equipment[i].desc.c_str(), {r.x + 70, r.y + 35}, 12, C(210, 229, 233));
+            int nextMilestone = std::min(20, ((save.equipLevel[i] / 5) + 1) * 5);
+            std::stringstream stage;
+            stage << u8"距 " << nextMilestone << u8" 级还差 " << std::max(0, nextMilestone - save.equipLevel[i]) << u8" 级";
+            text.draw(stage.str().c_str(), {r.x + 246, r.y + 36}, 11, C(255, 225, 128));
+        }
+        const int lv = save.equipLevel[selectedEquip];
+        Rectangle info{34, 614, 362, 110};
+        DrawPanel(info);
+        text.draw(u8"强化预览", {info.x + 18, info.y + 14}, 17, C(255, 236, 142));
+        std::stringstream cur;
+        cur << u8"下级消耗 金" << EquipGoldCost(lv) << u8" 材" << EquipMatCost(lv);
+        text.draw(cur.str().c_str(), {info.x + 18, info.y + 44}, 13, C(216, 233, 236));
+        int milestone = std::min(20, ((lv / 5) + 1) * 5);
+        int idx = std::max(0, milestone / 5 - 1);
+        text.draw((u8"下一阶段：" + equipment[selectedEquip].milestones[idx]).c_str(), {info.x + 18, info.y + 72}, 13, C(255, 225, 128));
+        DrawButton(navBack, u8"返回", C(80, 96, 108));
+        DrawButton(navMain, u8"强化选中装备", C(91, 156, 198), lv < 20);
+    }
+
+    void DrawTalentsOverlay() {
+        Rectangle page{20, 104, 390, 724};
+        text.centeredStroke(u8"天赋树", {page.x, 122, page.width, 34}, 28, C(255, 252, 236), C(25, 33, 42));
+        text.centered(u8"账号永久成长，关键节点会改变战斗和奖励效率", {page.x + 16, 156, page.width - 32, 20}, 13, C(207, 228, 233));
+        DrawResourceBar();
+        const char* branchNames[] = {u8"攻击", u8"防御", u8"资源", u8"职业"};
+        for (int b = 0; b < kTalentBranchCount; ++b) text.draw(branchNames[b], {32, 270.0f + b * 84.0f}, 14, C(255, 236, 142));
+        for (int i = 0; i < kTalentCount; ++i) {
+            Rectangle r = TalentNodeRect(i);
+            r.y += 112.0f;
+            const TalentDef& t = talents[i];
+            bool can = CanUpgradeTalent(i);
+            bool locked = !TalentPrereqMet(i);
+            Color body = locked ? C(70, 76, 82) : (can ? C(92, 153, 111) : C(56, 72, 84));
+            if (i == selectedTalent) DrawCircle(static_cast<int>(r.x + 28), static_cast<int>(r.y + 28), 34, C(255, 232, 122, 70));
+            DrawRectangleRounded(r, 0.22f, 10, body);
+            text.centered(t.keyNode ? u8"◆" : std::to_string(t.node + 1).c_str(), {r.x, r.y + 7, r.width, 22}, 20, C(255, 255, 238));
+            std::stringstream lv;
+            lv << save.talentLevel[i] << "/" << t.maxLevel;
+            text.centered(lv.str().c_str(), {r.x, r.y + 32, r.width, 16}, 12, C(236, 245, 243));
+        }
+        Rectangle info{34, 654, 362, 106};
+        DrawPanel(info);
+        const TalentDef& t = talents[selectedTalent];
+        text.draw(t.name.c_str(), {info.x + 18, info.y + 12}, 17, C(255, 236, 142));
+        DrawWrapped(t.desc, {info.x + 18, info.y + 36, info.width - 36, 34}, 12, C(211, 229, 233));
+        std::stringstream cost;
+        cost << u8"消耗 金" << TalentGoldCost(save.talentLevel[selectedTalent]) << u8" 天赋点" << TalentPointCost(save.talentLevel[selectedTalent]);
+        text.draw(cost.str().c_str(), {info.x + 18, info.y + 80}, 12, C(255, 225, 128));
+        DrawButton(navBack, u8"返回", C(80, 96, 108));
+        DrawButton(navMain, u8"升级选中天赋", C(91, 156, 198), CanUpgradeTalent(selectedTalent));
+    }
+
+    std::string LineupTag() const {
+        bool fire = HasRole(RoleKind::FireMage);
+        bool thunder = HasRole(RoleKind::ThunderWarlock);
+        bool berserker = HasRole(RoleKind::Berserker);
+        int defense = (HasRole(RoleKind::ShieldGuard) ? 1 : 0) + (HasRole(RoleKind::FrostArcher) ? 1 : 0) + (HasRole(RoleKind::NaturePriest) ? 1 : 0);
+        if (defense >= 2) return u8"防守阵容";
+        if (berserker) return u8"Boss 阵容";
+        if (fire || thunder) return u8"清怪阵容";
+        return u8"均衡阵容";
+    }
+
+    std::string LineupWeakness() const {
+        if (!HasRole(RoleKind::FrostArcher) && !HasRole(RoleKind::ShieldGuard)) return u8"短板：缺少控制和防御，疾行怪可能吃力。";
+        if (!HasRole(RoleKind::Berserker)) return u8"短板：缺少单体爆发，Boss 关可能耗时较长。";
+        if (!HasRole(RoleKind::NaturePriest)) return u8"短板：没有治疗，三星容错较低。";
+        return u8"阵容较均衡，可以根据关卡类型微调。";
+    }
+
+    void DrawLineupOverlay() {
+        Rectangle page{20, 104, 390, 724};
+        text.centeredStroke(u8"阵容编辑", {page.x, 122, page.width, 34}, 28, C(255, 252, 236), C(25, 33, 42));
+        text.centered(u8"最多上阵 3 个角色，会影响局内初始英雄和战斗加成", {page.x + 16, 156, page.width - 32, 20}, 13, C(207, 228, 233));
+        DrawResourceBar();
+        for (int i = 0; i < kLineupSlots; ++i) {
+            Rectangle r{34.0f + i * 128.0f, 276, 104, 72};
+            int id = save.lineup[i];
+            DrawPanel(r, selectedLineupSlot == i ? C(67, 90, 104, 238) : C(44, 59, 70, 230));
+            DrawCircle(static_cast<int>(r.x + 23), static_cast<int>(r.y + 32), 18, metaHeroes[id].main);
+            text.draw(metaHeroes[id].name.c_str(), {r.x + 46, r.y + 16}, 13, C(255, 247, 235));
+            std::stringstream ls;
+            ls << "Lv." << save.heroLevel[id] << " " << save.heroStar[id] << u8"星";
+            text.draw(ls.str().c_str(), {r.x + 46, r.y + 38}, 12, C(255, 229, 128));
+        }
+        Rectangle analysis{34, 360, 362, 82};
+        DrawPanel(analysis);
+        text.draw((u8"阵容标签：" + LineupTag()).c_str(), {analysis.x + 18, analysis.y + 14}, 16, C(255, 236, 142));
+        text.draw((u8"总战力：" + std::to_string(LineupPower())).c_str(), {analysis.x + 18, analysis.y + 40}, 14, C(215, 232, 235));
+        DrawWrapped(LineupWeakness(), {analysis.x + 18, analysis.y + 62, analysis.width - 36, 18}, 12, C(211, 229, 233));
+        for (int i = 0; i < kMetaHeroCount; ++i) {
+            Rectangle r{34.0f, 462.0f + i * 44.0f, 362.0f, 36.0f};
+            DrawRectangleRounded(r, 0.16f, 10, InLineup(i) ? C(72, 102, 88) : C(47, 63, 75));
+            DrawCircle(static_cast<int>(r.x + 22), static_cast<int>(r.y + 18), 13, metaHeroes[i].main);
+            text.draw(metaHeroes[i].name.c_str(), {r.x + 48, r.y + 7}, 13, C(244, 250, 245));
+            text.draw((metaHeroes[i].role + u8" · " + metaHeroes[i].job).c_str(), {r.x + 136, r.y + 8}, 11, C(206, 225, 230));
+            text.draw(InLineup(i) ? u8"已上阵" : u8"点击替换", {r.x + 292, r.y + 9}, 11, C(255, 226, 128));
+        }
+        DrawButton(navBack, u8"返回", C(80, 96, 108));
+        DrawButton(navMain, u8"阵容已保存", C(91, 126, 166));
+    }
+
+    void DrawChestsOverlay() {
+        Rectangle page{20, 104, 390, 724};
+        int chapter = stages[selectedStage].chapter - 1;
+        int stars = ChapterStars(chapter);
+        text.centeredStroke(u8"章节星级宝箱", {page.x, 122, page.width, 34}, 28, C(255, 252, 236), C(25, 33, 42));
+        std::stringstream sub;
+        sub << stages[selectedStage].chapterName << u8" 星数 " << stars << "/30";
+        text.centered(sub.str().c_str(), {page.x + 16, 156, page.width - 32, 20}, 14, C(207, 228, 233));
+        DrawResourceBar();
+        const int needs[] = {10, 20, 30};
+        const char* names[] = {u8"10 星宝箱", u8"20 星宝箱", u8"30 星宝箱"};
+        for (int i = 0; i < 3; ++i) {
+            Rectangle r{42.0f, 296.0f + i * 122.0f, 346.0f, 94.0f};
+            bool ready = stars >= needs[i];
+            bool claimed = ChestClaimed(chapter, i);
+            DrawPanel(r, claimed ? C(50, 61, 67, 220) : (ready ? C(72, 98, 73, 235) : C(48, 61, 72, 230)));
+            DrawCircle(static_cast<int>(r.x + 45), static_cast<int>(r.y + 46), 24, ready ? C(255, 207, 92) : C(118, 128, 136));
+            text.draw(names[i], {r.x + 88, r.y + 16}, 18, C(255, 236, 142));
+            text.draw(ResourceText(ChestReward(chapter, i)).c_str(), {r.x + 88, r.y + 44}, 12, C(216, 233, 236));
+            std::stringstream stateText;
+            if (claimed) stateText << u8"已领取";
+            else if (ready) stateText << u8"可领取";
+            else stateText << u8"还差 " << (needs[i] - stars) << u8" 星";
+            text.draw(stateText.str().c_str(), {r.x + 88, r.y + 68}, 13, ready && !claimed ? C(137, 239, 133) : C(202, 218, 222));
+        }
+        DrawButton(navBack, u8"返回", C(80, 96, 108));
+        DrawButton(navMain, u8"回到地图", C(91, 126, 166));
+    }
+
     void DrawDraftOverlay() {
         DrawRectangle(0, 0, kScreenW, kScreenH, C(6, 10, 16, 142));
         Rectangle panel{26, 206, 378, 504};
@@ -2727,23 +3881,46 @@ private:
 
     void DrawResultOverlay(bool win) {
         DrawRectangle(0, 0, kScreenW, kScreenH, C(6, 10, 16, 155));
-        Rectangle r{42, 464, 346, 372};
+        const StageInfo& stage = StageAt(currentRunResult.stageIndex);
+        Rectangle r{34, 438, 362, 410};
         DrawRectangleRounded({r.x + 4, r.y + 8, r.width, r.height}, 0.12f, 14, C(0, 0, 0, 120));
         DrawRectangleRounded(r, 0.12f, 14, C(45, 58, 70, 245));
-        text.centeredStroke(win ? u8"防守胜利" : u8"城墙失守", {r.x, r.y + 42, r.width, 48}, 38,
+        text.centeredStroke(win ? u8"防守胜利" : u8"城墙失守", {r.x, r.y + 30, r.width, 44}, 34,
                             win ? C(255, 236, 126) : C(255, 139, 115), C(25, 32, 40));
+        std::stringstream stageLine;
+        stageLine << stage.chapter << "-" << stage.local << " " << stage.name;
+        text.centered(stageLine.str().c_str(), {r.x + 18, r.y + 78, r.width - 36, 22}, 15, C(214, 231, 236));
         std::stringstream stats;
         stats << u8"击杀 " << kills << u8" · 最高 " << highestStar << u8"★ · 合成 " << merges;
-        text.centered(stats.str().c_str(), {r.x, r.y + 116, r.width, 28}, 19, C(214, 231, 236));
-        if (!resultLoot.empty()) {
-            text.centered(resultLoot.c_str(), {r.x + 18, r.y + 150, r.width - 36, 46}, 15, win ? C(255, 229, 132) : C(207, 224, 229));
+        text.centered(stats.str().c_str(), {r.x, r.y + 104, r.width, 24}, 17, C(214, 231, 236));
+        if (win) {
+            std::string stars = StarCountText(currentRunResult.stars);
+            text.centered(stars.c_str(), {r.x, r.y + 136, r.width, 34}, 28, C(255, 230, 104));
+            DrawCheckLine(r.x + 28, r.y + 184, currentRunResult.starDone[0], u8"成功通关");
+            DrawCheckLine(r.x + 28, r.y + 210, currentRunResult.starDone[1], u8"城墙生命高于 50%");
+            DrawCheckLine(r.x + 28, r.y + 236, currentRunResult.starDone[2], u8"完成关卡特殊条件");
+            text.draw((u8"奖励：" + ResourceText(currentRunResult.reward)).c_str(), {r.x + 28, r.y + 274}, 13, C(218, 235, 236));
+            if (currentRunResult.firstClear) text.draw((u8"首通：" + ResourceText(currentRunResult.firstReward)).c_str(), {r.x + 28, r.y + 298}, 13, C(255, 226, 126));
+            if (currentRunResult.unlockedNext) text.draw(u8"已解锁下一关", {r.x + 28, r.y + 322}, 13, C(136, 232, 135));
+            DrawWrapped(currentRunResult.advice, {r.x + 28, r.y + 346, r.width - 56, 34}, 12, C(213, 231, 235));
+        } else {
+            std::stringstream fail;
+            fail << u8"失败波次：" << currentRunResult.failedWave << "/" << totalWaves;
+            text.draw(fail.str().c_str(), {r.x + 28, r.y + 150}, 16, C(255, 170, 134));
+            text.draw((u8"失败原因：" + std::string(FailureName(currentRunResult.failure))).c_str(), {r.x + 28, r.y + 184}, 18, C(255, 236, 142));
+            DrawWrapped(currentRunResult.advice, {r.x + 28, r.y + 224, r.width - 56, 58}, 13, C(255, 222, 142));
+            text.draw((u8"安慰奖励：" + ResourceText(currentRunResult.totalReward)).c_str(), {r.x + 28, r.y + 304}, 13, C(218, 235, 236));
+            text.draw(u8"失败不会解锁下一关，但奖励已保存。", {r.x + 28, r.y + 332}, 12, C(198, 219, 224));
         }
-        Rectangle main{95, 702, 240, 58};
-        DrawRectangleRounded(main, 0.36f, 14, win ? C(92, 188, 86) : C(188, 94, 77));
-        text.centered(win ? u8"进入下一关" : u8"重试本关", main, 25, C(255, 255, 240));
-        Rectangle menu{128, 776, 174, 45};
-        DrawRectangleRounded(menu, 0.34f, 12, C(76, 91, 103));
-        text.centered(u8"选择关卡", menu, 20, C(235, 245, 245));
+        DrawButton({52, 720, 150, 48}, win ? u8"下一关" : u8"返回地图", win ? C(89, 174, 85) : C(78, 96, 108));
+        DrawButton({226, 720, 150, 48}, win ? u8"去养成" : u8"去提升", C(91, 126, 166));
+        DrawButton({52, 784, 150, 44}, u8"关卡地图", C(78, 96, 108));
+        DrawButton({226, 784, 150, 44}, u8"再战一次", C(158, 104, 75));
+    }
+
+    void DrawCheckLine(float x, float y, bool done, const char* label) {
+        DrawCircle(static_cast<int>(x + 8), static_cast<int>(y + 8), 8, done ? C(105, 224, 117) : C(120, 126, 132));
+        text.draw(label, {x + 24, y}, 13, done ? C(220, 238, 232) : C(178, 188, 192));
     }
 };
 

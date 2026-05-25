@@ -1,63 +1,53 @@
 # Blue Planet Defense
 
-一个使用 C++17 + raylib 5.5 制作的竖屏随机合成塔防原型，玩法参考《永远的蔚蓝星球》的“英雄随机召唤、2 合 1、局内随机强化、局外养成”循环。工程不是 pygame，也不是网页 JS；它可以通过 CMake 编译成本机可执行程序。
+`Blue Planet Defense` 是一个 C++17 + raylib 5.5 的竖屏塔防原型。当前版本采用“局外养成推进 + 局内实时随机合成塔防”的结构：玩家在主城培养角色、装备、天赋和阵容，进入关卡后游玩实时随机召唤、2 合 1、拖拽合成、三选一强化和怪物推进守城玩法。
 
-![Lobby](screenshots/lobby.png)
-![Battle](screenshots/battle-30-heroes.png)
-![Meta](screenshots/meta-upgrade.png)
+这个仓库不是纯 UI Demo，所有主要按钮都有实际效果，资源、星级、关卡解锁、宝箱、阵容、角色养成、装备养成和天赋养成都会写入本地存档。
 
-## 当前内容
-
-- 竖屏 430x900 战斗界面，包含雪地峡谷战场、城墙、英雄槽、怪物推进、血条和底部操作区。
-- 完整局外大厅流程：启动进入大厅，可进入关卡选择或局外养成；只有点击“开始防守”才进入局内战斗。
-- 30 个递增关卡，每关有词条、怪物生命/速度/护甲倍率、怪物密度、材料奖励和装备掉率。
-- 10 波战斗，前 9 波随机怪群，第 10 波 Boss。
-- 随机召唤、点击合成、拖拽合成、最高 5 星。
-- 局内三选一强化，包含伤害、攻速、控制、毒伤、Boss 增伤、城墙修复、召唤折扣、机关冷却、范围增强。
-- 机关技能：霜冻、炮击、王者号令。
-- 本地存档 `save.dat`：保存已解锁关卡、星尘、材料、装备掉落、支援人物、装备/图腾/披风等级、最佳关卡和胜利次数。
-- 局外养成：装备、图腾、披风升级；装备影响攻击/攻速，图腾影响控制/毒伤/Boss 增伤，披风影响城墙生命/回复/召唤折扣。
-- 支援抽卡：支援人物提供伤害、攻速、控制、城防或资源 Buff。
-- WAV 音效：召唤、合成、射击、命中、霜冻、炮击、强化、胜利、失败。
-
-## 30 英雄体系
-
-已录入 30 个英雄：强袭、剑仙、钢铁汪、火箭、蘑菇头、游侠、小炮、孙悟空、哪吒、赵云、剑圣、骑士、卡卡、帝斯拉、暴风、闪电之子、雪姬、火焰法师、毒液、黑百合、河掌柜、死亡骑士、海王、安妮、妲己、天使、美人鱼、雅典娜、冰法师、地鼠。
-
-每个英雄在 `src/game_content.hpp` 中拥有：
-
-- `name` / `job`
-- `spriteKey`
-- 主色、点缀色、弹道色
-- `AttackStyle`
-- `HeroSkill`
-- 基础伤害、冷却、射程、范围
-
-每个英雄也有局内技能逻辑，覆盖连射/穿透、Boss 增伤、炸弹、中毒、灼烧、突刺、连斩、冰冻、闪电链、龙卷、召唤承伤、魅惑反推、攻速辅助、易伤等方向。
-
-## 资源替换路径
-
-英雄图片路径已经预留。后续给某个英雄换图时，只需要按 `spriteKey` 放入两帧 PNG：
+## Gameplay Loop
 
 ```text
-assets/sprites/<hero spriteKey>_0.png
-assets/sprites/<hero spriteKey>_1.png
+主城查看目标
+  -> 选择关卡
+  -> 局内实时塔防
+  -> 胜利/失败结算
+  -> 获得资源
+  -> 角色/装备/天赋/阵容养成
+  -> 战力提升
+  -> 推进更高关卡或回头补星
 ```
 
-例如：
+## Features
 
-```text
-assets/sprites/hero_assault_0.png
-assets/sprites/hero_assault_1.png
-assets/sprites/hero_wukong_0.png
-assets/sprites/hero_wukong_1.png
-```
+- 局外主城：首页显示资源、主阵容战力、下一关、推荐战力、挑战预估和推荐行动。
+- 5 章 50 关：普通关、精英关、Boss 关，支持锁定/解锁、星级保存、推荐阵容和奖励预览。
+- 局内实时战斗：7 个英雄槽位、随机召唤、点击/拖拽 2 合 1、最高 5 星、10 波怪物、城墙血条。
+- 局内随机成长：三选一强化、霜冻、炮击、王者号令、速度切换和统计面板。
+- 30 个局内英雄：强袭、剑仙、钢铁汪、火箭、蘑菇头、游侠、小炮、孙悟空、哪吒、赵云、剑圣、骑士、卡卡、帝斯拉、暴风、闪电之子、雪姬、火焰法师、毒液、黑百合、河掌柜、死亡骑士、海王、安妮、妲己、天使、美人鱼、雅典娜、冰法师、地鼠。
+- 6 个局外角色：火焰法师、冰霜弓手、圣盾守卫、雷电术士、狂战士、自然祭司。升级和升星会提升战力，并映射到局内初始英雄与战斗加成。
+- 4 个装备槽：武器、护甲、饰品、宝物。强化后真实影响局内伤害、城墙生命、攻速、Boss 伤害和流派加成。
+- 4 条天赋分支：攻击、防御、资源、职业，每条 5 个节点，有前置关系和关键节点。
+- 章节星级宝箱：每章 10/20/30 星奖励，领取状态会保存，不能重复领取。
+- 结算系统：胜利给普通奖励、首通奖励、星级和解锁；失败给安慰奖励和明确提升建议。
+- 本地存档：`save.dat` 保存资源、关卡解锁、星级、宝箱、角色等级/星级、阵容、装备和天赋。
 
-如果某个英雄暂时没有专属 PNG，游戏会自动使用程序绘制的 fallback 形象，不会空白。命中特效路径也已经通过 `AttackStyle` / `ImpactKind` 预留，当前包含箭矢、冰晶、斩击、毒雾、炸弹、圣光、激光、闪电、火焰、风场、召唤冲击、魅惑波。
+## Screenshots
 
-## 构建运行
+| 主城 | 关卡地图 |
+| --- | --- |
+| ![city](screenshots/city-hybrid.png) | ![map](screenshots/map-hybrid.png) |
 
-需要 CMake 3.24+ 和 C++17 编译器。第一次配置会通过 CMake FetchContent 下载 raylib 5.5。
+| 局内实时战斗 | 结算 |
+| --- | --- |
+| ![battle](screenshots/battle-hybrid.png) | ![result](screenshots/result-hybrid.png) |
+
+## Build
+
+Requirements:
+
+- CMake 3.24+
+- C++17 compiler
+- Git access for CMake `FetchContent`, because raylib 5.5 is fetched during configure.
 
 ```bash
 cmake -S . -B build
@@ -65,77 +55,71 @@ cmake --build build -j4
 ./build/blue_planet_defense
 ```
 
-macOS 上如果窗口无法打开，请确认已安装 Xcode Command Line Tools：
-
-```bash
-xcode-select --install
-```
-
-## 自检
+## Verify
 
 ```bash
 ./build/blue_planet_defense --verify
 ```
 
-自检覆盖：
+The verification command checks:
 
-- 30 关数据。
-- 30 类英雄数据、数值和资源 key。
-- 英雄贴图槽位与英雄目录一致，便于后续替换资源。
-- 30 个英雄逐个命中测试，确保每个英雄都有伤害或有效战斗效果。
-- WAV 音效加载。
-- 存档数据。
-- 10 波配置、召唤、点击合成、拖拽合成、随机强化。
-- 怪物数量递增、首波压力、后期血量和密度。
-- 霜冻、炮击、王者号令。
-- 局外装备养成、支援 Buff、支援抽卡、胜利掉落。
-- 模拟循环稳定性。
+- 30 个局内英雄和局内战斗关卡数据。
+- 5 章 50 关、6 个局外角色、4 个装备槽、20 个天赋节点。
+- 启动进入局外主城。
+- 局内旧玩法：10 波、随机召唤、点击合成、拖拽合成、随机强化、怪物递增、霜冻、炮击、王者号令。
+- 30 英雄技能和攻击/命中特效逻辑。
+- 新局外养成：角色升级、角色升星、装备强化、天赋升级、胜利资源与星级结算、失败安慰奖励和失败原因。
 
-## 生成截图
+## Screenshot Commands
 
 ```bash
-./build/blue_planet_defense --screenshot start screenshots/lobby.png
-./build/blue_planet_defense --screenshot stage screenshots/stage-select.png
-./build/blue_planet_defense --screenshot meta screenshots/meta-upgrade.png
-./build/blue_planet_defense --screenshot battle screenshots/battle-30-heroes.png
-./build/blue_planet_defense --screenshot draft screenshots/draft-optimized.png
+./build/blue_planet_defense --screenshot city screenshots/city-hybrid.png
+./build/blue_planet_defense --screenshot stage screenshots/map-hybrid.png
+./build/blue_planet_defense --screenshot heroes screenshots/heroes-hybrid.png
+./build/blue_planet_defense --screenshot equipment screenshots/equipment-hybrid.png
+./build/blue_planet_defense --screenshot talents screenshots/talents-hybrid.png
+./build/blue_planet_defense --screenshot lineup screenshots/lineup-hybrid.png
+./build/blue_planet_defense --screenshot battle screenshots/battle-hybrid.png
+./build/blue_planet_defense --screenshot result screenshots/result-hybrid.png
 ```
 
-## 操作
+## Controls
 
-- 大厅：点击“开始闯关”进入关卡选择，点击“局外养成”进入养成页。
-- 关卡选择：左右箭头切换已解锁关卡，点击“开始防守”进入战斗。
-- 局外养成：点击装备、图腾、披风升级；点击支援左右箭头切换已拥有支援，点击“招募支援”抽卡。
+- 主城：点击“开始闯关”进入地图；点击角色、装备、天赋、阵容进入对应养成页。
+- 地图：点击关卡节点选择关卡，点击“开始防守”进入局内实时战斗。
 - 局内：点击“召唤”消耗银币召唤英雄。
-- 合成：点击两个相同英雄同星级槽位，或直接拖拽到目标槽位，进行 2 合 1。
-- 强化：点击“强化”打开三选一。
+- 合成：点击两个相同英雄同星级槽位，或拖拽到另一个同英雄同星级槽位。
+- 强化：点击“强化”打开三选一随机成长。
 - 机关：点击“霜冻”“炮击”“王者号令”使用主动能力。
-- 速度/统计：点击左侧 `x1` 切换速度，点击“统计”查看战斗统计。
+- 结算：胜利可去下一关、回地图或去养成；失败可再战、回地图或跳转推荐养成。
 
-## 工程结构
+## Asset Replacement
+
+英雄图片路径已经预留。后续给某个局内英雄换图时，按 `spriteKey` 放入两帧 PNG：
 
 ```text
-.
-├── CMakeLists.txt
-├── assets/
-│   ├── audio/          # WAV 音效
-│   └── sprites/        # 场景、英雄、怪物 PNG
-├── screenshots/        # 示例截图
-├── src/
-│   ├── main.cpp        # 程序入口和命令行参数
-│   ├── game.hpp        # Game 对外接口
-│   ├── game.cpp        # 状态机、战斗、UI、存档、验证
-│   ├── game_types.hpp  # 通用类型、枚举、数据结构
-│   └── game_content.hpp# 英雄、支援、关卡数据表
-└── tools/
-    └── generate_assets.py
+assets/sprites/<hero spriteKey>_0.png
+assets/sprites/<hero spriteKey>_1.png
 ```
 
-## 不提交的本地文件
+如果某个英雄暂时没有专属 PNG，游戏会自动使用程序绘制的 fallback 形象，不会空白。命中特效通过 `AttackStyle` / `ImpactKind` 配置，当前包含箭矢、冰晶、斩击、毒雾、炸弹、圣光、激光、闪电、火焰、风场、召唤冲击、魅惑波。
+
+## Project Structure
+
+```text
+src/main.cpp          程序入口和命令行参数
+src/game.hpp          Game 对外接口
+src/game.cpp          状态机、旧局内战斗、新局外 UI、存档、验证
+src/game_types.hpp    通用类型、枚举、存档结构
+src/game_content.hpp  旧局内 30 英雄、局内关卡和支援兼容数据
+src/meta_content.hpp  新局外 6 角色、50 关、装备、天赋数据
+assets/audio/         WAV 音效
+assets/sprites/       场景、英雄、怪物 PNG
+```
+
+## Local Files Not Committed
 
 - `build/`
 - `save.dat`
 - `.DS_Store`
 - `outputs/`
-
-这些文件由本机运行或构建生成，不需要进入仓库。
