@@ -256,8 +256,27 @@ public:
         int coinsBefore = coins;
         TrySummon();
         check(summons == 1, "summon action increments summon counter");
+        check(summonProgress == 0, "fifth total summoned hero resets slot unlock record");
         check(coins < coinsBefore, "summon spends coins");
+        int unlockedBefore = 0;
+        for (bool unlocked : slotUnlocked) if (unlocked) unlockedBefore++;
+        check(unlockedBefore == 6, "fifth summon unlocks one adjacent board slot");
+        slots[1] = {};
+        summons = 0;
+        summonProgress = 0;
+        slotUnlocked = {};
+        UnlockInitialSlots();
+        coins = 9999;
+        for (int i = 0; i < 5; ++i) {
+            int emptySlot = 1 + (i % 5);
+            slots[emptySlot] = {};
+            TrySummon();
+        }
+        int unlockedAfter = 0;
+        for (bool unlocked : slotUnlocked) if (unlocked) unlockedAfter++;
+        check(unlockedAfter == 6 && summonProgress == 0, "five summons reset record and unlock one adjacent board slot");
 
+        ResetStage();
         state = GameState::Playing;
         selectedSlot = 2;
         HandleSlotClick(4);
@@ -301,19 +320,11 @@ public:
         SpawnEnemy();
         check(!enemies.empty() && enemies.front().maxHp > firstLevelHp * 4.0f && lateFirstWaveCount > 35, "late levels strongly increase monster health and density");
         currentLevel = 0;
-        float enemyHpBefore = enemies.front().hp;
-        UseFreeze();
-        check(freezeCooldown > 0.0f && enemies.front().slowTimer > 0.0f, "freeze mechanism applies control and cooldown");
-        UseCannon();
-        check(cannonCooldown > 0.0f && enemies.front().hp < enemyHpBefore, "cannon mechanism damages enemies");
         check(ProjectileSpeed(AttackStyle::Arrow) != ProjectileSpeed(AttackStyle::Bomb) &&
               ImpactForAttack(AttackStyle::Frost) == ImpactKind::FrostBurst &&
               ImpactForAttack(AttackStyle::Bomb) == ImpactKind::BombBlast,
               "hero attack styles define distinct projectile and hit effects");
         check(VerifyAllHeroSkills(), "all 30 hero skills apply damage or a valid combat effect");
-        kingCharge = 5;
-        UseKing();
-        check(kingCharge == 0 && kingBuffTimer > 0.0f, "king command spends charge and applies buff");
         save.activeSupport = 0;
         save.supportCopies[0] = std::max(1, save.supportCopies[0]);
         ResetStage();
@@ -390,6 +401,7 @@ private:
     std::vector<FloatingText> floaters;
     std::vector<Impact> impacts;
     std::vector<DraftChoice> draftChoices;
+    std::array<bool, kMaxSlots> slotUnlocked{};
 
     int currentLevel = 0;
     int selectedStage = 0;
@@ -406,9 +418,6 @@ private:
     float spawnInterval = 0.7f;
     float waveBreak = 1.5f;
     float stageBanner = 2.2f;
-    float kingBuffTimer = 0.0f;
-    float freezeCooldown = 0.0f;
-    float cannonCooldown = 0.0f;
     float toastTimer = 0.0f;
     std::string toast = "";
     std::string resultLoot = "";
@@ -424,7 +433,7 @@ private:
     int upgradeCost = 100;
     int wallHp = 6000;
     int wallMaxHp = 6000;
-    int kingCharge = 4;
+    int summonProgress = 4;
     int kills = 0;
     int summons = 0;
     int merges = 0;
@@ -441,7 +450,6 @@ private:
     float bossDamage = 1.0f;
     float wallRegen = 0.0f;
     float summonDiscount = 0.0f;
-    float mechanismCooldownBonus = 1.0f;
     float rewardBonus = 1.0f;
 
     Rectangle startButton{176, 812, 220, 54};
@@ -462,9 +470,7 @@ private:
     Rectangle nextStageButton{312, 596, 64, 48};
     Rectangle summonButton{322, 805, 86, 72};
     Rectangle upgradeButton{22, 805, 86, 72};
-    Rectangle freezeButton{122, 792, 76, 58};
-    Rectangle kingButton{177, 744, 76, 78};
-    Rectangle cannonButton{232, 792, 76, 58};
+    Rectangle summonRecordBox{177, 744, 76, 78};
     Rectangle pauseButton{30, 178, 46, 58};
     Rectangle muteButton{324, 56, 84, 42};
     Rectangle speedButton{24, 278, 54, 44};
@@ -1231,14 +1237,14 @@ private:
                              u8"普通关精英关疾行怪重甲怪群体小怪混合敌群预计轻松可以挑战风险困难"
                              u8"升级升星强化选中装备关键节点锁定已上阵点击替换宝箱可领取还差星"
                              u8"第关异变山谷波次统计暂停继续胜利失败重试进入下一关"
-                             u8"银币召唤强化霜冻炮击号令城墙生命剩余怪物击杀最高星级次数合成"
+                             u8"银币召唤强化城墙生命剩余怪物击杀最高星级次数合成进度位置开放"
                              u8"随机强化选择一项成长点击或拖拽相同英雄进行二合一满槽位相同英雄可合成"
-                             u8"攻速伤害控制毒伤首领猎手城墙修复召唤折扣机关冷却范围清怪"
+                             u8"攻速伤害控制毒伤首领猎手城墙修复召唤折扣战位扩展范围清怪"
                              u8"翠叶射手冰晶法师王冠骑士毒雾术士机关工匠月铃祭司法师战士毒系辅助"
                              u8"冷却中金币不足没有空位已暂停"
                              u8"箭雨校准全体伤害射手额外受益急速号角期间再提升寒霜锁链时间更久"
                              u8"毒雾蔓延持续溅射扩大对立即回复并获得缓慢恢复星辉费用降低"
-                             u8"整备缩短裂晶爆破猛烈随机进化需要同英雄同星级没有怪物王者号令"
+                             u8"裂晶爆破猛烈随机进化需要同英雄同星级新位置开放全部召唤位已开放"
                              u8"防守城墙失守重试本关进入下一关个关卡局内"
                              u8"装备图腾披风养成星尘升级攻击生命控制收益已保存音效开关启闭图片精灵帧真实音效"
                              u8"已解锁与、提升星尘不足碎片符文丝线招募券支援人物抽卡掉落稀有史诗神话"
@@ -1346,12 +1352,8 @@ private:
         bossDamage = 1.0f;
         wallRegen = 0.0f;
         summonDiscount = 0.0f;
-        mechanismCooldownBonus = 1.0f;
         rewardBonus = 1.0f;
-        kingBuffTimer = 0.0f;
-        freezeCooldown = 0.0f;
-        cannonCooldown = 0.0f;
-        kingCharge = 4;
+        summonProgress = 0;
         resultHandled = false;
         const StageInfo& stage = StageAt(selectedStage);
         int levelNo = currentLevel + 1;
@@ -1428,12 +1430,21 @@ private:
         summonCost = 45;
         upgradeCost = 100;
         slots = {};
+        slotUnlocked = {};
+        UnlockInitialSlots();
         slots[2] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[0]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
         slots[3] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[1]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
         slots[4] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[0]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
-        slots[6] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[2]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
+        slots[5] = Hero{true, MetaRoleToHeroType(metaHeroes[save.lineup[2]].kind), 1, RandFloat(rng, 0.0f, 0.35f), 0.0f};
+        for (const auto& h : slots) {
+            if (h.active) summonProgress = (summonProgress + 1) % 5;
+        }
         StartWave();
         ShowToast(u8"点击或拖拽相同英雄进行 2 合 1");
+    }
+
+    void UnlockInitialSlots() {
+        for (int i = 1; i <= 5; ++i) slotUnlocked[i] = true;
     }
 
     int MetaRoleToHeroType(RoleKind kind) const {
@@ -1513,7 +1524,7 @@ private:
 
     int SlotAt(Vector2 mouse) const {
         for (int i = 0; i < kMaxSlots; ++i) {
-            if (PointIn(SlotRect(i), mouse)) return i;
+            if (slotUnlocked[i] && PointIn(SlotRect(i), mouse)) return i;
         }
         return -1;
     }
@@ -1846,19 +1857,6 @@ private:
             TryUpgrade();
             return;
         }
-        if (PointIn(freezeButton, mouse)) {
-            UseFreeze();
-            return;
-        }
-        if (PointIn(cannonButton, mouse)) {
-            UseCannon();
-            return;
-        }
-        if (PointIn(kingButton, mouse)) {
-            UseKing();
-            return;
-        }
-
         int slot = SlotAt(mouse);
         if (slot >= 0) {
             if (slots[slot].active) {
@@ -1880,9 +1878,11 @@ private:
             return;
         }
         std::vector<int> empty;
-        for (int i = 0; i < kMaxSlots; ++i) if (!slots[i].active) empty.push_back(i);
+        for (int i = 0; i < kMaxSlots; ++i) {
+            if (slotUnlocked[i] && !slots[i].active) empty.push_back(i);
+        }
         if (empty.empty()) {
-            ShowToast(u8"槽位已满，先合成");
+            ShowToast(HasLockedSlot() ? u8"已解锁槽位已满，继续合成或累计召唤扩位" : u8"槽位已满，先合成");
             return;
         }
         coins -= cost;
@@ -1890,9 +1890,38 @@ private:
         int type = PreferredSummonType();
         slots[slot] = Hero{true, type, 1, RandFloat(rng, 0.05f, 0.45f), 0.55f};
         summons++;
+        summonProgress++;
+        if (summonProgress >= 5) {
+            summonProgress = 0;
+            UnlockRandomAdjacentSlot();
+        }
         summonCost = std::min(130, summonCost + 2 + summons / 5);
         AddImpact(SlotCenter(slot), heroesDef[type].projectile, 34.0f, 0.45f, ImpactKind::HolyRing);
         PlaySfx(assets.summon);
+    }
+
+    bool HasLockedSlot() const {
+        for (bool unlocked : slotUnlocked) if (!unlocked) return true;
+        return false;
+    }
+
+    bool UnlockRandomAdjacentSlot() {
+        std::vector<int> candidates;
+        for (int i = 0; i < kMaxSlots; ++i) {
+            if (slotUnlocked[i]) continue;
+            bool adjacent = (i > 0 && slotUnlocked[i - 1]) || (i + 1 < kMaxSlots && slotUnlocked[i + 1]);
+            if (adjacent) candidates.push_back(i);
+        }
+        if (candidates.empty()) {
+            ShowToast(u8"全部召唤位已开放");
+            return false;
+        }
+        int slot = candidates[RandInt(rng, 0, static_cast<int>(candidates.size()) - 1)];
+        slotUnlocked[slot] = true;
+        AddImpact(SlotCenter(slot), C(117, 236, 255), 44.0f, 0.7f, ImpactKind::HolyRing);
+        AddFloat(u8"新位置开放", SlotCenter(slot), C(172, 239, 255));
+        ShowToast(u8"召唤位 +1");
+        return true;
     }
 
     void TryUpgrade() {
@@ -1919,7 +1948,6 @@ private:
         slots[remove] = {};
         merges++;
         highestStar = std::max(highestStar, slots[keep].star);
-        kingCharge = std::min(5, kingCharge + 1);
         coins += 12 + slots[keep].star * 6;
         AddImpact(SlotCenter(keep), C(255, 225, 86), 46.0f, 0.6f, ImpactKind::HolyRing);
         AddFloat(u8"合成 +1★", SlotCenter(keep), C(255, 238, 117));
@@ -1966,14 +1994,14 @@ private:
         draftChoices.clear();
         std::vector<DraftChoice> pool = {
             {u8"箭雨校准", u8"全体伤害 +18%，射手额外受益", 0},
-            {u8"急速号角", u8"全体攻速 +16%，号令期间再提升", 1},
-            {u8"寒霜锁链", u8"控制时间 +30%，霜冻机关更久", 2},
+            {u8"急速号角", u8"全体攻速 +16%，高星英雄更快出手", 1},
+            {u8"寒霜锁链", u8"控制时间 +30%，冰冻与减速更久", 2},
             {u8"毒雾蔓延", u8"持续伤害 +45%，毒系溅射扩大", 3},
             {u8"首领猎手", u8"对 Boss 伤害 +35%", 4},
             {u8"城墙修复", u8"立即回复 900，并获得缓慢恢复", 5},
             {u8"星辉召唤", u8"召唤费用降低 18%", 6},
-            {u8"机关整备", u8"霜冻和炮击冷却缩短 24%", 7},
-            {u8"裂晶爆破", u8"范围伤害 +25%，炮击更猛烈", 8},
+            {u8"战位扩展", u8"立即补满召唤进度并尝试开放新位置", 7},
+            {u8"裂晶爆破", u8"范围伤害 +25%，爆炸英雄更猛烈", 8},
         };
         while (draftChoices.size() < 3 && !pool.empty()) {
             int idx = RandInt(rng, 0, static_cast<int>(pool.size()) - 1);
@@ -1994,74 +2022,18 @@ private:
                 wallRegen += 1.1f;
                 break;
             case 6: summonDiscount = std::min(0.45f, summonDiscount + 0.18f); break;
-            case 7: mechanismCooldownBonus = std::max(0.48f, mechanismCooldownBonus * 0.76f); break;
+            case 7:
+                summonProgress = 0;
+                UnlockRandomAdjacentSlot();
+                break;
             case 8:
                 for (auto& def : heroesDef) def.splash *= 1.25f;
                 break;
         }
     }
 
-    void UseFreeze() {
-        if (freezeCooldown > 0.0f) {
-            ShowToast(u8"霜冻冷却中");
-            return;
-        }
-        for (auto& e : enemies) {
-            e.stunTimer = std::max(e.stunTimer, 1.0f * controlBonus);
-            e.slowTimer = std::max(e.slowTimer, 4.0f * controlBonus);
-            e.flash = 0.3f;
-        }
-        AddImpact({kScreenW * 0.5f, 405.0f}, C(130, 236, 255), 170.0f, 0.72f, ImpactKind::FrostBurst);
-        freezeCooldown = 13.0f * mechanismCooldownBonus;
-        PlaySfx(assets.freeze);
-    }
-
-    void UseCannon() {
-        if (cannonCooldown > 0.0f) {
-            ShowToast(u8"炮击冷却中");
-            return;
-        }
-        Vector2 center{0.0f, 0.0f};
-        int count = 0;
-        for (const auto& e : enemies) {
-            center = Vector2Add(center, e.pos);
-            count++;
-        }
-        if (count == 0) {
-            ShowToast(u8"没有怪物");
-            return;
-        }
-        center = Vector2Scale(center, 1.0f / count);
-        AddImpact(center, C(255, 154, 72), 115.0f, 0.5f, ImpactKind::BombBlast);
-        float damage = 360.0f + currentLevel * 28.0f + wave * 24.0f;
-        for (auto& e : enemies) {
-            float d = Vector2Distance(center, e.pos);
-            if (d < 122.0f) {
-                DamageEnemy(e, damage * (1.0f - d / 160.0f), true);
-            }
-        }
-        cannonCooldown = 9.5f * mechanismCooldownBonus;
-        PlaySfx(assets.cannon);
-    }
-
-    void UseKing() {
-        if (kingCharge < 5) {
-            ShowToast(u8"号令需要 5/5");
-            return;
-        }
-        kingCharge = 0;
-        kingBuffTimer = 6.0f;
-        wallHp = std::min(wallMaxHp, wallHp + 420);
-        AddImpact({kScreenW * 0.5f, 735.0f}, C(255, 224, 105), 100.0f, 0.8f, ImpactKind::HolyRing);
-        ShowToast(u8"王者号令！");
-        PlaySfx(assets.draft);
-    }
-
     void UpdateGame(float dt) {
         stageBanner = std::max(0.0f, stageBanner - dt);
-        freezeCooldown = std::max(0.0f, freezeCooldown - dt);
-        cannonCooldown = std::max(0.0f, cannonCooldown - dt);
-        kingBuffTimer = std::max(0.0f, kingBuffTimer - dt);
         if (wallRegen > 0.0f) {
             wallHp = std::min(wallMaxHp, wallHp + static_cast<int>(wallRegen * dt * 32.0f));
         }
@@ -2077,7 +2049,6 @@ private:
                 if (e.kind == EnemyKind::Brute) reward += 6;
                 coins += reward;
                 kills++;
-                kingCharge = std::min(5, kingCharge + (e.kind == EnemyKind::Boss ? 2 : 1));
                 AddFloat("+" + std::to_string(reward), e.pos, C(255, 229, 118));
                 AddImpact(e.pos, C(145, 234, 220), e.radius + 20.0f, 0.35f, ImpactKind::Pulse);
                 return true;
@@ -2233,7 +2204,7 @@ private:
             const HeroDef& def = heroesDef[h.type];
             float starMult = 1.0f + (h.star - 1) * 0.78f + std::pow(std::max(0, h.star - 1), 1.35f) * 0.18f;
             float dmg = def.baseDamage * starMult * globalDamage;
-            float speedBuff = globalAttackSpeed * (kingBuffTimer > 0.0f ? 1.85f : 1.0f);
+            float speedBuff = globalAttackSpeed;
             h.cooldown = std::max(0.12f, def.cooldown / speedBuff / (1.0f + (h.star - 1) * 0.1f));
             Projectile p;
             p.pos = SlotCenter(i);
@@ -3212,6 +3183,13 @@ private:
                               slots[dragSlot].active && slots[i].type == slots[dragSlot].type &&
                               slots[i].star == slots[dragSlot].star && slots[i].star < 5;
             DrawRectangleRounded({r.x + 2, r.y + 6, r.width, r.height}, 0.13f, 8, C(24, 31, 36, 95));
+            if (!slotUnlocked[i]) {
+                DrawRectangleRounded(r, 0.13f, 8, C(72, 82, 88));
+                DrawRectangleRounded({r.x + 5, r.y + 5, r.width - 10, r.height - 10}, 0.11f, 8, C(58, 68, 72));
+                DrawCircleLines(static_cast<int>(r.x + r.width * 0.5f), static_cast<int>(r.y + 29), 13, C(160, 175, 178, 120));
+                DrawLineEx({r.x + 20, r.y + 29}, {r.x + r.width - 20, r.y + 29}, 3, C(160, 175, 178, 120));
+                continue;
+            }
             DrawRectangleRounded(r, 0.13f, 8, dropTarget ? C(163, 139, 76) : (selected ? C(109, 151, 159) : C(96, 111, 117)));
             DrawRectangleRounded({r.x + 5, r.y + 5, r.width - 10, r.height - 10}, 0.11f, 8, C(132, 144, 145));
             DrawRectangleRounded({r.x + 8, r.y + 8, r.width - 16, r.height - 16}, 0.1f, 8, C(102, 111, 112));
@@ -3342,9 +3320,7 @@ private:
         DrawCoinPill({17, 760, 100, 42}, coins, 28);
 
         DrawControlButton(upgradeButton, u8"强化", upgradeCost, C(118, 84, 56), C(244, 224, 120), false);
-        DrawMechanismButton(freezeButton, u8"霜冻", freezeCooldown, C(83, 161, 191), C(166, 235, 255));
-        DrawKingButton();
-        DrawMechanismButton(cannonButton, u8"炮击", cannonCooldown, C(130, 91, 60), C(255, 176, 74));
+        DrawSummonRecord();
         DrawControlButton(summonButton, u8"召唤", static_cast<int>(std::round(summonCost * (1.0f - summonDiscount))), C(117, 88, 58), C(246, 216, 100), true);
 
         std::stringstream left;
@@ -3379,30 +3355,25 @@ private:
         text.centered(std::to_string(cost).c_str(), {r.x + 27, r.y + 56, 48, 18}, 17, C(255, 231, 206));
     }
 
-    void DrawMechanismButton(Rectangle r, const char* label, float cooldown, Color body, Color icon) {
-        DrawRectangleRounded({r.x + 2, r.y + 4, r.width, r.height}, 0.22f, 12, C(18, 24, 30, 95));
-        DrawRectangleRounded(r, 0.22f, 12, body);
-        DrawCircle(static_cast<int>(r.x + r.width * 0.5f), static_cast<int>(r.y + 21), 17, C(61, 76, 83));
-        DrawCircle(static_cast<int>(r.x + r.width * 0.5f), static_cast<int>(r.y + 21), 10, icon);
-        text.centered(label, {r.x, r.y + 35, r.width, 18}, 15, C(247, 242, 219));
-        if (cooldown > 0.0f) {
-            DrawRectangleRounded(r, 0.22f, 12, C(9, 13, 17, 128));
-            std::stringstream ss;
-            ss << static_cast<int>(std::ceil(cooldown));
-            text.centered(ss.str().c_str(), r, 24, C(255, 255, 255));
-        }
-    }
-
-    void DrawKingButton() {
-        Rectangle r = kingButton;
+    void DrawSummonRecord() {
+        Rectangle r = summonRecordBox;
         DrawRectangleRounded({r.x + 3, r.y + 6, r.width, r.height}, 0.18f, 12, C(18, 24, 31, 100));
         DrawRectangleRounded(r, 0.18f, 12, C(91, 101, 104));
         DrawRectangleRounded({r.x + 8, r.y + 8, r.width - 16, r.height - 18}, 0.18f, 12, C(142, 158, 166));
-        Hero king{true, 2, 2, 0.0f, kingBuffTimer > 0.0f ? 0.6f : 0.0f};
-        DrawHero(king, {r.x + r.width * 0.5f, r.y + 31}, 0.82f, false);
+        int pips = std::max(0, std::min(5, summonProgress));
+        Vector2 center{r.x + r.width * 0.5f, r.y + 31};
+        DrawCircleV(center, 24, C(80, 97, 103));
+        DrawCircleV(center, 18, C(51, 65, 72));
+        for (int i = 0; i < 5; ++i) {
+            float a = -PI / 2.0f + i * (2.0f * PI / 5.0f);
+            Vector2 dot{center.x + std::cos(a) * 28.0f, center.y + std::sin(a) * 23.0f};
+            DrawCircleV(dot, 4.2f, i < pips ? C(255, 224, 76) : C(92, 109, 114));
+        }
+        DrawRectangleRounded({center.x - 12, center.y - 7, 24, 14}, 0.35f, 8, C(179, 204, 210));
+        DrawCircleV({center.x, center.y}, 8, C(114, 226, 239));
         std::stringstream ss;
-        ss << kingCharge << "/5";
-        text.centered(ss.str().c_str(), {r.x, r.y + 58, r.width, 18}, 18, kingCharge >= 5 ? C(255, 226, 83) : C(122, 221, 238));
+        ss << summonProgress << "/5";
+        text.centered(ss.str().c_str(), {r.x, r.y + 58, r.width, 18}, 18, C(122, 221, 238));
     }
 
     void DrawHeart(Vector2 p, float s, Color color) {
@@ -3444,6 +3415,7 @@ private:
             {u8"击杀", std::to_string(kills)},
             {u8"最高星级", std::to_string(highestStar)},
             {u8"召唤次数", std::to_string(summons)},
+            {u8"扩位进度", std::to_string(summonProgress) + "/5"},
             {u8"合成次数", std::to_string(merges)},
         };
         for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
